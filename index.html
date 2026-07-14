@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Reihen-Navigator</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+<style>
+  :root{
+    --bg:#12161c; --panel:#1b212b; --panel2:#232b37; --line:#323c4a;
+    --ink:#eef2f7; --muted:#93a0b2; --gold:#e0b34a; --cyan:#39d3e0;
+    --danger:#e0625a; --ok:#5ac47a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overscroll-behavior:none}
+  #map{position:absolute;inset:0;bottom:0;background:#0d1014}
+  .leaflet-container{background:#0d1014}
+
+  /* Top status bar */
+  #topbar{position:absolute;top:0;left:0;right:0;z-index:1000;
+    display:flex;align-items:center;gap:10px;padding:10px 12px;
+    background:linear-gradient(#12161cf2,#12161ccc);backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line)}
+  #topbar .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+  #topbar.rec .dot{background:var(--cyan);box-shadow:0 0 0 0 #39d3e0aa;animation:pulse 1.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 #39d3e0aa}70%{box-shadow:0 0 0 9px #39d3e000}100%{box-shadow:0 0 0 0 #39d3e000}}
+  #status{font-size:14px;line-height:1.15;min-width:0;flex:1}
+  #status b{color:var(--gold);font-weight:600}
+  #status small{display:block;color:var(--muted);font-size:11.5px}
+
+  /* Bottom toolbar */
+  #toolbar{position:absolute;left:0;right:0;bottom:0;z-index:1000;
+    display:flex;gap:8px;padding:10px 10px calc(10px + env(safe-area-inset-bottom));
+    background:linear-gradient(#12161c00,#12161cf5 40%)}
+  .btn{flex:1;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    border-radius:14px;padding:12px 8px;font-size:13px;font-weight:600;
+    display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer}
+  .btn .ic{font-size:19px;line-height:1}
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{background:var(--gold);color:#1a1305;border-color:var(--gold)}
+  .btn.rec{background:var(--cyan);color:#062226;border-color:var(--cyan)}
+  .btn.warn{background:var(--danger);color:#2a0806;border-color:var(--danger)}
+
+  /* Sheets */
+  .sheet{position:absolute;left:0;right:0;bottom:0;z-index:1200;
+    background:var(--panel);border-top-left-radius:20px;border-top-right-radius:20px;
+    border-top:1px solid var(--line);max-height:78%;display:flex;flex-direction:column;
+    transform:translateY(110%);transition:transform .22s ease;box-shadow:0 -14px 40px #0008}
+  .sheet.open{transform:translateY(0)}
+  .sheet h2{margin:0;padding:16px 18px 10px;font-size:17px;display:flex;align-items:center;justify-content:space-between}
+  .sheet h2 .x{color:var(--muted);font-size:22px;cursor:pointer;padding:0 4px}
+  .sheet .body{overflow:auto;padding:0 14px 20px}
+  .backdrop{position:absolute;inset:0;z-index:1150;background:#0008;opacity:0;pointer-events:none;transition:opacity .2s}
+  .backdrop.open{opacity:1;pointer-events:auto}
+
+  .row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);
+    background:var(--panel2);border-radius:14px;margin-bottom:8px}
+  .row .grow{flex:1;min-width:0}
+  .row .name{font-weight:600;font-size:15px}
+  .row .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .row .mini{border:1px solid var(--line);background:transparent;color:var(--ink);
+    border-radius:10px;padding:8px 10px;font-size:13px;cursor:pointer}
+  .row .mini.danger{color:var(--danger);border-color:#5a2b28}
+  .empty{color:var(--muted);text-align:center;padding:30px 10px;font-size:14px;line-height:1.5}
+  .daygroup{margin-bottom:14px}
+  .daygroup .dh{font-weight:700;color:var(--gold);font-size:14px;margin:6px 4px 8px}
+
+  .field-row{display:flex;gap:12px;align-items:center}
+  .swatch{width:14px;height:14px;border-radius:4px;flex:0 0 auto}
+
+  /* Draw hint */
+  #drawhint{position:absolute;top:64px;left:12px;right:12px;z-index:1100;
+    background:#1b212bf2;border:1px solid var(--gold);border-radius:12px;
+    padding:10px 12px;font-size:13px;display:none;line-height:1.35}
+  #drawhint b{color:var(--gold)}
+
+  label.field{display:block;margin:10px 0}
+  label.field span{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+  input[type=text],input[type=number]{width:100%;padding:12px;border-radius:12px;
+    border:1px solid var(--line);background:var(--panel2);color:var(--ink);font-size:15px}
+  .rangewrap{display:flex;align-items:center;gap:12px}
+  .rangewrap input[type=range]{flex:1}
+  .rangewrap .val{font-variant-numeric:tabular-nums;font-weight:700;color:var(--gold);min-width:64px;text-align:right}
+
+  .leaflet-control-attribution{font-size:9px;background:#0008;color:#889}
+  .fab{position:absolute;right:12px;bottom:96px;z-index:1000;width:46px;height:46px;border-radius:50%;
+    background:var(--panel);border:1px solid var(--line);color:var(--ink);font-size:20px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center}
+  .field-label{background:#12161ccc;color:#fff;border:1px solid var(--gold);border-radius:8px;
+    padding:1px 7px;font-size:12px;font-weight:600;white-space:nowrap}
+  .fab.warnfab{bottom:150px;border-color:#5a2b28;color:var(--danger);font-size:22px}
+
+  /* Live stats */
+  #stats{position:absolute;top:60px;left:12px;right:12px;z-index:990;display:none;
+    grid-template-columns:repeat(4,1fr);gap:6px}
+  #stats.show{display:grid}
+  .stat{background:#12161ce6;border:1px solid var(--line);border-radius:12px;padding:8px 6px;text-align:center}
+  .stat .v{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--cyan)}
+  .stat .l{font-size:10.5px;color:var(--muted);margin-top:1px;text-transform:uppercase;letter-spacing:.4px}
+
+  /* Quick pick buttons */
+  .pick{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 4px}
+  .pick button{border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+    border-radius:12px;padding:14px 8px;font-size:14px;font-weight:600;cursor:pointer;display:flex;gap:8px;align-items:center;justify-content:center}
+  .pick button .e{font-size:18px}
+
+  /* Toggle */
+  .toggle{display:flex;align-items:center;justify-content:space-between;padding:12px 2px;border-top:1px solid var(--line);margin-top:6px}
+  .toggle .lab{font-size:15px}
+  .sw{width:50px;height:28px;border-radius:16px;background:var(--panel2);border:1px solid var(--line);position:relative;cursor:pointer;flex:0 0 auto}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:var(--muted);transition:.18s}
+  .sw.on{background:#2a3b2f;border-color:var(--ok)}
+  .sw.on::after{left:24px;background:var(--ok)}
+
+  /* Night mode dims the imagery so covered/uncovered pops */
+  body.night .leaflet-tile{filter:brightness(.42) contrast(1.12) saturate(.7)}
+  body.night #map{background:#05070a}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="topbar">
+  <span class="dot"></span>
+  <div id="status"><b>Bereit</b><small>Feld zeichnen oder Fahrt starten</small></div>
+</div>
+
+<div id="drawhint">
+  <b>Feld zeichnen:</b> auf die Karte tippen, um Eckpunkte zu setzen. Mindestens 3 Punkte, dann „Feld speichern“.
+</div>
+
+<div id="stats">
+  <div class="stat"><div class="v" id="stTime">0:00</div><div class="l">Zeit</div></div>
+  <div class="stat"><div class="v" id="stDist">0,00</div><div class="l">km</div></div>
+  <div class="stat"><div class="v" id="stSpeed">0,0</div><div class="l">km/h</div></div>
+  <div class="stat"><div class="v" id="stArea">0,00</div><div class="l">ha</div></div>
+</div>
+
+<button class="fab warnfab" id="obstBtn" title="Hindernis markieren">⚠</button>
+<button class="fab" id="locBtn" title="Mein Standort">◎</button>
+
+<div id="toolbar">
+  <button class="btn" id="drawBtn"><span class="ic">✎</span>Feld<br>zeichnen</button>
+  <button class="btn" id="fieldsBtn"><span class="ic">▤</span>Felder</button>
+  <button class="btn primary" id="driveBtn"><span class="ic">▶</span>Fahrt<br>starten</button>
+  <button class="btn" id="histBtn"><span class="ic">☰</span>Historie</button>
+  <button class="btn" id="setBtn"><span class="ic">⚙</span>Breite</button>
+</div>
+
+<div class="backdrop" id="backdrop"></div>
+
+<!-- Fields sheet -->
+<div class="sheet" id="fieldsSheet">
+  <h2>Meine Felder <span class="x" data-close>×</span></h2>
+  <div class="body" id="fieldsBody"></div>
+</div>
+
+<!-- History sheet -->
+<div class="sheet" id="histSheet">
+  <h2>Historie <span class="x" data-close>×</span></h2>
+  <div class="body" id="histBody"></div>
+</div>
+
+<!-- Settings sheet -->
+<div class="sheet" id="setSheet">
+  <h2>Einstellungen <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <p style="color:var(--muted);font-size:13.5px;line-height:1.5;margin-top:4px">
+      Die Breite, die dein Traktor pro Durchfahrt bearbeitet – im Weinbau meist der Reihenabstand.
+      Diese Breite wird als „bereits gefahrene“ Spur auf der Karte markiert.
+    </p>
+    <label class="field"><span>Arbeitsbreite in Metern</span>
+      <div class="rangewrap">
+        <input type="range" id="widthRange" min="0.8" max="6" step="0.1" value="2">
+        <span class="val" id="widthVal">2,0 m</span>
+      </div>
+    </label>
+    <div class="toggle">
+      <div class="lab">Nachtmodus<br><span style="color:var(--muted);font-size:12px">Luftbild abdunkeln, Spur hervorheben</span></div>
+      <div class="sw" id="nightSw"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Obstacle sheet -->
+<div class="sheet" id="obstSheet">
+  <h2>Hindernis markieren <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin:2px 0 8px">
+      Wird an deiner aktuellen Position gesetzt. Nachts gut sichtbar, um Masten, Steine oder Gräben sicher zu umfahren.
+    </p>
+    <div class="pick" id="obstPick">
+      <button data-t="Mast/Pfahl"><span class="e">🪧</span>Mast / Pfahl</button>
+      <button data-t="Stein"><span class="e">🪨</span>Stein</button>
+      <button data-t="Loch/Graben"><span class="e">🕳️</span>Loch / Graben</button>
+      <button data-t="Sonstiges"><span class="e">⚠️</span>Sonstiges</button>
+    </div>
+  </div>
+</div>
+
+<!-- Save-field sheet -->
+<div class="sheet" id="saveSheet">
+  <h2>Feld speichern <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <label class="field"><span>Name des Feldes</span>
+      <input type="text" id="fieldName" placeholder="z. B. Steillage Süd" autocomplete="off">
+    </label>
+    <p id="haInfo" style="color:var(--gold);font-weight:700;font-size:16px;margin:4px 2px 14px"></p>
+    <button class="btn primary" style="border-radius:14px" id="confirmSave">Feld speichern</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ---------- Speicher: nutzt window.storage (Claude) sonst localStorage (Handy) ---------- */
+const store = {
+  async get(k){ try{
+    if(window.storage){const r=await window.storage.get(k);return r?r.value:null;}
+    return window.localStorage.getItem(k);
+  }catch(e){return null;} },
+  async set(k,v){ try{
+    if(window.storage){await window.storage.set(k,v);} else {window.localStorage.setItem(k,v);}
+  }catch(e){console.warn('save fail',e);} },
+  async del(k){ try{
+    if(window.storage){await window.storage.delete(k);} else {window.localStorage.removeItem(k);}
+  }catch(e){} },
+  async list(prefix){ try{
+    if(window.storage){const r=await window.storage.list(prefix);return r?r.keys:[];}
+    return Object.keys(window.localStorage).filter(x=>x.startsWith(prefix));
+  }catch(e){return [];} }
+};
+
+/* ---------- State ---------- */
+let map, satLayer, osmLayer;
+let fields = [];                 // {id,name,coords:[[lat,lng]...],ha}
+let obstacles = [];              // {id,lat,lng,type}
+let settings = { width: 2.0, night:false };
+let fieldLayers = L.layerGroup();
+let coverageLayer = L.layerGroup();
+let obstacleLayer = L.layerGroup();
+let posMarker = null;
+let recStart=0, lastPos=null, lastT=0, distM=0, statsTimer=null, lastSpeed=0;
+
+let drawing=false, drawPts=[], drawMarkers=[], drawLine=null;
+let recording=false, track=[], recWatch=null, currentField=null, simTimer=null;
+let wakeLock=null, follow=true;
+
+const $ = s=>document.querySelector(s);
+const fmt = n => n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+/* ---------- Karte ---------- */
+function initMap(){
+  map = L.map('map',{zoomControl:false,attributionControl:true}).setView([49.79,7.05],16); // Mosel-Region als Start
+  satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:20,maxNativeZoom:19,attribution:'Luftbild © Esri'}).addTo(map);
+  osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+  L.control.zoom({position:'topright'}).addTo(map);
+  fieldLayers.addTo(map); coverageLayer.addTo(map); obstacleLayer.addTo(map);
+  map.on('click', onMapClick);
+  map.on('dragstart', ()=>{ if(recording) follow=false; });
+}
+
+/* ---------- Felder rendern ---------- */
+function renderFields(){
+  fieldLayers.clearLayers();
+  fields.forEach(f=>{
+    const poly = L.polygon(f.coords,{color:'#e0b34a',weight:2,fillColor:'#e0b34a',fillOpacity:.10}).addTo(fieldLayers);
+    const c = poly.getBounds().getCenter();
+    L.marker(c,{icon:L.divIcon({className:'',html:`<div class="field-label">${f.name} · ${fmt(f.ha)} ha</div>`,iconSize:[0,0]})}).addTo(fieldLayers);
+  });
+}
+
+/* ---------- Zeichnen ---------- */
+function toggleDraw(){
+  if(drawing){ finishDraw(); return; }
+  drawing=true; drawPts=[]; drawMarkers=[]; 
+  if(drawLine){fieldLayers.removeLayer(drawLine);drawLine=null;}
+  $('#drawhint').style.display='block';
+  setDrive(false);
+  $('#drawBtn').classList.add('primary');
+  $('#drawBtn').innerHTML='<span class="ic">✓</span>Feld<br>speichern';
+  setStatus('Feld zeichnen','Eckpunkte auf die Karte tippen');
+}
+function onMapClick(e){
+  if(!drawing) return;
+  drawPts.push([e.latlng.lat,e.latlng.lng]);
+  const m=L.circleMarker(e.latlng,{radius:6,color:'#e0b34a',fillColor:'#12161c',fillOpacity:1,weight:2}).addTo(fieldLayers);
+  drawMarkers.push(m);
+  if(drawLine) fieldLayers.removeLayer(drawLine);
+  const ring = drawPts.length>2 ? drawPts.concat([drawPts[0]]) : drawPts;
+  drawLine=L.polyline(ring,{color:'#e0b34a',weight:2,dashArray:'6 5'}).addTo(fieldLayers);
+}
+let pendingHa=0, pendingCoords=null;
+function finishDraw(){
+  drawing=false; $('#drawhint').style.display='none';
+  $('#drawBtn').classList.remove('primary');
+  $('#drawBtn').innerHTML='<span class="ic">✎</span>Feld<br>zeichnen';
+  if(drawPts.length<3){ cleanupDraw(); setStatus('Bereit','Zu wenige Punkte – abgebrochen'); return; }
+  pendingCoords = drawPts.slice();
+  pendingHa = polyHa(pendingCoords);
+  $('#fieldName').value='';
+  $('#haInfo').textContent='Größe: '+fmt(pendingHa)+' ha';
+  openSheet('saveSheet');
+}
+function cleanupDraw(){
+  drawMarkers.forEach(m=>fieldLayers.removeLayer(m)); drawMarkers=[];
+  if(drawLine){fieldLayers.removeLayer(drawLine);drawLine=null;}
+  drawPts=[];
+}
+function polyHa(coords){
+  const ring = coords.map(c=>[c[1],c[0]]); ring.push(ring[0]);
+  try{ return turf.area(turf.polygon([ring]))/10000; }catch(e){ return 0; }
+}
+async function confirmSave(){
+  const name = ($('#fieldName').value||'').trim() || ('Feld '+(fields.length+1));
+  const f = { id:'f'+Date.now(), name, coords:pendingCoords, ha:pendingHa };
+  fields.push(f);
+  await store.set('field:'+f.id, JSON.stringify(f));
+  cleanupDraw(); renderFields(); closeSheets();
+  setStatus('Feld gespeichert','<b>'+name+'</b> · '+fmt(f.ha)+' ha');
+  if(map.getZoom()<15) map.fitBounds(L.polygon(f.coords).getBounds().pad(0.3));
+}
+
+/* ---------- Felder-Liste ---------- */
+function openFields(){
+  const b=$('#fieldsBody');
+  if(!fields.length){ b.innerHTML='<div class="empty">Noch keine Felder.<br>Tippe unten auf „Feld zeichnen“ und setze die Eckpunkte auf der Karte.</div>'; }
+  else{
+    b.innerHTML = fields.map(f=>`
+      <div class="row">
+        <div class="swatch" style="background:#e0b34a"></div>
+        <div class="grow"><div class="name">${f.name}</div><div class="sub">${fmt(f.ha)} ha</div></div>
+        <button class="mini" data-go="${f.id}">Zeigen</button>
+        <button class="mini danger" data-del="${f.id}">Löschen</button>
+      </div>`).join('');
+  }
+  openSheet('fieldsSheet');
+}
+async function delField(id){
+  fields = fields.filter(f=>f.id!==id);
+  await store.del('field:'+id);
+  renderFields(); openFields();
+}
+
+/* ---------- Fahrt / Aufzeichnung ---------- */
+function setDrive(on){
+  const btn=$('#driveBtn'), bar=$('#topbar');
+  if(on){ btn.classList.remove('primary'); btn.classList.add('warn');
+    btn.innerHTML='<span class="ic">■</span>Fahrt<br>beenden'; bar.classList.add('rec'); }
+  else{ btn.classList.remove('warn'); btn.classList.add('primary');
+    btn.innerHTML='<span class="ic">▶</span>Fahrt<br>starten'; bar.classList.remove('rec'); }
+}
+function toggleDrive(){
+  if(recording){ stopDrive(); return; }
+  startDrive();
+}
+function startDrive(){
+  if(drawing) finishDraw();
+  recording=true; track=[]; currentField=null; follow=true; setDrive(true);
+  coverageLayer.clearLayers();
+  requestWake();
+  recStart=Date.now(); lastPos=null; lastT=0; distM=0; lastSpeed=0;
+  $('#stats').classList.add('show');
+  statsTimer=setInterval(()=>updateStats(lastSpeed), 1000);
+  updateStats(0);
+  setStatus('Aufzeichnung läuft','Suche Standort …');
+  if(navigator.geolocation){
+    recWatch = navigator.geolocation.watchPosition(onPos, geoErr,
+      {enableHighAccuracy:true, maximumAge:1000, timeout:15000});
+  } else {
+    geoErr({message:'kein GPS'});
+  }
+}
+function geoErr(e){
+  // Kein GPS (z. B. hier im Chat-Vorschaufenster) → Simulation anbieten
+  if(!recording) return;
+  const f = pickFieldForSim();
+  if(f){
+    setStatus('Kein GPS – Simulation','Zeige Beispiel-Fahrt auf <b>'+f.name+'</b>');
+    simulateDrive(f);
+  } else {
+    setStatus('Kein GPS','Zeichne zuerst ein Feld, dann läuft die Test-Simulation. Auf dem Handy (per HTTPS) wird echtes GPS genutzt.');
+    stopDriveNoSave();
+  }
+}
+function pickFieldForSim(){
+  if(!fields.length) return null;
+  const c = map.getCenter();
+  let best=fields[0], bd=Infinity;
+  fields.forEach(f=>{ const cc=L.polygon(f.coords).getBounds().getCenter();
+    const d=map.distance(c,cc); if(d<bd){bd=d;best=f;} });
+  return best;
+}
+function onPos(p){
+  const lat=p.coords.latitude, lng=p.coords.longitude;
+  updatePosMarker(lat,lng);
+  if(recording && follow && !simTimer) map.setView([lat,lng], Math.max(map.getZoom(),17), {animate:false});
+  const now=Date.now();
+  if(lastPos){
+    const seg=map.distance(lastPos,[lat,lng]);
+    distM+=seg;
+    if(typeof p.coords.speed==='number' && p.coords.speed>=0){ lastSpeed=p.coords.speed*3.6; }
+    else if(lastT){ const dt=(now-lastT)/1000; if(dt>0) lastSpeed=(seg/dt)*3.6; }
+  }
+  lastPos=[lat,lng]; lastT=now;
+  updateStats(lastSpeed);
+  track.push([lat,lng]);
+  // Feld automatisch erkennen
+  const f = detectField(lat,lng);
+  if(f && (!currentField || currentField.id!==f.id)){
+    currentField=f;
+    setStatus('Im Feld: '+f.name, 'Aufzeichnung aktiv · '+fmt(settings.width).replace(/,00$/,'')+' m Breite');
+  } else if(!f && currentField){
+    setStatus('Außerhalb der Felder','Fahre in ein Feld – die Aufzeichnung läuft weiter');
+  } else if(!currentField){
+    setStatus('Aufzeichnung läuft', f?('Im Feld: '+f.name):'Noch keinem Feld zugeordnet');
+  }
+  drawCoverage();
+}
+function updatePosMarker(lat,lng){
+  if(!posMarker){
+    posMarker=L.circleMarker([lat,lng],{radius:7,color:'#0b1013',weight:3,fillColor:'#e0b34a',fillOpacity:1}).addTo(map);
+  } else posMarker.setLatLng([lat,lng]);
+}
+function detectField(lat,lng){
+  const pt=turf.point([lng,lat]);
+  for(const f of fields){
+    const ring=f.coords.map(c=>[c[1],c[0]]); ring.push(ring[0]);
+    try{ if(turf.booleanPointInPolygon(pt,turf.polygon([ring]))) return f; }catch(e){}
+  }
+  return null;
+}
+function drawCoverage(){
+  if(track.length<2) return;
+  coverageLayer.clearLayers();
+  try{
+    const line=turf.lineString(track.map(c=>[c[1],c[0]]));
+    const buf=turf.buffer(line, settings.width/2, {units:'meters'});
+    L.geoJSON(buf,{style:{color:'#39d3e0',weight:1,fillColor:'#39d3e0',fillOpacity:.45}}).addTo(coverageLayer);
+  }catch(e){}
+}
+function stopDrive(){ finishRecording(true); }
+function stopDriveNoSave(){ finishRecording(false); }
+async function finishRecording(save){
+  recording=false; setDrive(false);
+  if(recWatch!==null && navigator.geolocation){ navigator.geolocation.clearWatch(recWatch); recWatch=null; }
+  if(simTimer){ clearInterval(simTimer); simTimer=null; }
+  if(statsTimer){ clearInterval(statsTimer); statsTimer=null; }
+  $('#stats').classList.remove('show');
+  releaseWake();
+  if(save && track.length>1){
+    const s = { id:'s'+Date.now(), date:new Date().toISOString(),
+      fieldId: currentField?currentField.id:null,
+      fieldName: currentField?currentField.name:'Ohne Feld',
+      track: track.slice(), width: settings.width };
+    await store.set('session:'+s.id, JSON.stringify(s));
+    setStatus('Fahrt gespeichert','<b>'+s.fieldName+'</b> · '+new Date().toLocaleDateString('de-DE'));
+  } else {
+    setStatus('Bereit','Fahrt beendet');
+  }
+  currentField=null;
+}
+
+/* ---------- Simulation (nur ohne echtes GPS, z. B. im Chat) ---------- */
+function simulateDrive(f){
+  currentField=f;
+  const path = serpentine(f, settings.width);
+  if(!path.length){ stopDriveNoSave(); return; }
+  let i=0;
+  map.fitBounds(L.polygon(f.coords).getBounds().pad(0.25));
+  simTimer=setInterval(()=>{
+    for(let k=0;k<3 && i<path.length;k++,i++){
+      if(track.length) distM+=map.distance(track[track.length-1], path[i]);
+      track.push(path[i]);
+    }
+    if(track.length) updatePosMarker(track[track.length-1][0],track[track.length-1][1]);
+    lastSpeed=6.5; updateStats(lastSpeed);
+    drawCoverage();
+    setStatus('Simulation: '+f.name, Math.round(100*i/path.length)+' % abgefahren');
+    if(i>=path.length){ clearInterval(simTimer); simTimer=null; setStatus('Simulation fertig','Tippe „Fahrt beenden“ zum Speichern'); }
+  }, 120);
+}
+function serpentine(f, widthM){
+  const b=L.polygon(f.coords).getBounds();
+  const latStep = widthM/111320;                         // m -> Breitengrad
+  const s=b.getSouth(), n=b.getNorth(), w=b.getWest(), e=b.getEast();
+  const lngStep=(e-w)/40;
+  const pts=[]; let dir=1, lat=s+latStep/2, row=0;
+  while(lat<=n){
+    const xs=[]; for(let lng=w;lng<=e;lng+=lngStep) xs.push(lng);
+    if(dir<0) xs.reverse();
+    for(const lng of xs){
+      if(detectContains(f,lat,lng)) pts.push([lat,lng]);
+    }
+    lat+=latStep; dir*=-1; row++;
+    if(row>800) break;
+  }
+  return pts;
+}
+function detectContains(f,lat,lng){
+  const ring=f.coords.map(c=>[c[1],c[0]]); ring.push(ring[0]);
+  try{ return turf.booleanPointInPolygon(turf.point([lng,lat]),turf.polygon([ring])); }catch(e){return false;}
+}
+
+/* ---------- Historie (nach Tagen) ---------- */
+async function openHistory(){
+  const keys = await store.list('session:');
+  const sessions=[];
+  for(const k of keys){ const v=await store.get(k); if(v){ try{ sessions.push(JSON.parse(v)); }catch(e){} } }
+  sessions.sort((a,b)=> b.date.localeCompare(a.date));
+  const b=$('#histBody');
+  if(!sessions.length){ b.innerHTML='<div class="empty">Noch keine Fahrten aufgezeichnet.<br>Starte eine Fahrt – jede Aufzeichnung erscheint hier nach Datum sortiert.</div>'; openSheet('histSheet'); return; }
+  const groups={};
+  sessions.forEach(s=>{ const d=new Date(s.date).toLocaleDateString('de-DE',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
+    (groups[d]=groups[d]||[]).push(s); });
+  b.innerHTML = Object.entries(groups).map(([day,list])=>`
+    <div class="daygroup"><div class="dh">${day}</div>
+      ${list.map(s=>`<div class="row">
+        <div class="swatch" style="background:#39d3e0"></div>
+        <div class="grow"><div class="name">${s.fieldName}</div>
+          <div class="sub">${new Date(s.date).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})} Uhr · ${fmt(s.width).replace(/,00$/,'')} m Breite</div></div>
+        <button class="mini" data-show='${s.id}'>Karte</button>
+      </div>`).join('')}
+    </div>`).join('');
+  b._sessions = sessions;
+  openSheet('histSheet');
+}
+async function showSession(id){
+  const v=await store.get('session:'+id); if(!v) return;
+  const s=JSON.parse(v);
+  coverageLayer.clearLayers();
+  try{
+    const line=turf.lineString(s.track.map(c=>[c[1],c[0]]));
+    const buf=turf.buffer(line, s.width/2, {units:'meters'});
+    L.geoJSON(buf,{style:{color:'#39d3e0',weight:1,fillColor:'#39d3e0',fillOpacity:.45}}).addTo(coverageLayer);
+    map.fitBounds(L.geoJSON(buf).getBounds().pad(0.2));
+  }catch(e){}
+  closeSheets();
+  setStatus('Historie: '+s.fieldName, new Date(s.date).toLocaleDateString('de-DE'));
+}
+
+/* ---------- Bildschirm anlassen ---------- */
+async function requestWake(){ try{ if('wakeLock' in navigator){ wakeLock=await navigator.wakeLock.request('screen'); } }catch(e){} }
+async function releaseWake(){ try{ if(wakeLock){ await wakeLock.release(); wakeLock=null; } }catch(e){} }
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && recording && !wakeLock) requestWake(); });
+
+/* ---------- UI-Helfer ---------- */
+function setStatus(title,sub){ $('#status').innerHTML='<b>'+title+'</b><small>'+(sub||'')+'</small>'; }
+function openSheet(id){ closeSheets(); $('#'+id).classList.add('open'); $('#backdrop').classList.add('open'); }
+function closeSheets(){ document.querySelectorAll('.sheet').forEach(s=>s.classList.remove('open')); $('#backdrop').classList.remove('open'); }
+
+/* ---------- Live-Werte ---------- */
+function updateStats(speed){
+  const sec = Math.floor((Date.now()-recStart)/1000);
+  const mm=Math.floor(sec/60), ss=sec%60, hh=Math.floor(mm/60);
+  $('#stTime').textContent = hh>0 ? hh+':'+String(mm%60).padStart(2,'0') : mm+':'+String(ss).padStart(2,'0');
+  $('#stDist').textContent = fmt(distM/1000);
+  $('#stSpeed').textContent = (speed||0).toLocaleString('de-DE',{minimumFractionDigits:1,maximumFractionDigits:1});
+  $('#stArea').textContent = fmt(distM*settings.width/10000);
+}
+
+/* ---------- Hindernisse ---------- */
+function obstIcon(type){
+  const e = type==='Stein'?'🪨' : type==='Loch/Graben'?'🕳️' : type==='Mast/Pfahl'?'🪧' : '⚠️';
+  return L.divIcon({className:'',html:`<div style="font-size:22px;filter:drop-shadow(0 1px 2px #000)">${e}</div>`,iconSize:[24,24],iconAnchor:[12,12]});
+}
+function renderObstacles(){
+  obstacleLayer.clearLayers();
+  obstacles.forEach(o=>{
+    L.marker([o.lat,o.lng],{icon:obstIcon(o.type)}).addTo(obstacleLayer)
+      .bindTooltip(o.type,{direction:'top',offset:[0,-10]});
+  });
+}
+async function addObstacle(type){
+  closeSheets();
+  const place = pos => saveObstacle(pos[0],pos[1],type);
+  if(lastPos){ place(lastPos); return; }
+  if(navigator.geolocation){
+    navigator.geolocation.getCurrentPosition(
+      p=>place([p.coords.latitude,p.coords.longitude]),
+      ()=>place([map.getCenter().lat,map.getCenter().lng]),
+      {enableHighAccuracy:true,timeout:8000});
+  } else place([map.getCenter().lat,map.getCenter().lng]);
+}
+async function saveObstacle(lat,lng,type){
+  const o={id:'o'+Date.now(),lat,lng,type};
+  obstacles.push(o);
+  await store.set('obstacle:'+o.id, JSON.stringify(o));
+  renderObstacles();
+  setStatus('Hindernis gesetzt', type);
+}
+
+/* ---------- Nachtmodus ---------- */
+function applyNight(){
+  document.body.classList.toggle('night', !!settings.night);
+  $('#nightSw').classList.toggle('on', !!settings.night);
+}
+async function toggleNight(){
+  settings.night=!settings.night;
+  await store.set('settings',JSON.stringify(settings));
+  applyNight();
+}
+
+/* ---------- Laden ---------- */
+async function loadAll(){
+  const sv = await store.get('settings'); if(sv){ try{ settings=JSON.parse(sv); }catch(e){} }
+  $('#widthRange').value=settings.width; $('#widthVal').textContent=fmt(settings.width)+' m';
+  applyNight();
+  const keys = await store.list('field:');
+  for(const k of keys){ const v=await store.get(k); if(v){ try{ fields.push(JSON.parse(v)); }catch(e){} } }
+  renderFields();
+  const okeys = await store.list('obstacle:');
+  for(const k of okeys){ const v=await store.get(k); if(v){ try{ obstacles.push(JSON.parse(v)); }catch(e){} } }
+  renderObstacles();
+  if(fields.length){ map.fitBounds(L.polygon(fields[0].coords).getBounds().pad(0.4)); }
+}
+
+/* ---------- Events ---------- */
+window.addEventListener('DOMContentLoaded', ()=>{
+  initMap(); loadAll();
+  $('#drawBtn').onclick=toggleDraw;
+  $('#driveBtn').onclick=toggleDrive;
+  $('#fieldsBtn').onclick=openFields;
+  $('#histBtn').onclick=openHistory;
+  $('#setBtn').onclick=()=>openSheet('setSheet');
+  $('#confirmSave').onclick=confirmSave;
+  $('#backdrop').onclick=closeSheets;
+  document.querySelectorAll('[data-close]').forEach(x=>x.onclick=closeSheets);
+
+  $('#widthRange').oninput=async e=>{ settings.width=parseFloat(e.target.value);
+    $('#widthVal').textContent=fmt(settings.width)+' m'; await store.set('settings',JSON.stringify(settings)); };
+
+  $('#fieldsBody').onclick=e=>{
+    const go=e.target.getAttribute('data-go'), del=e.target.getAttribute('data-del');
+    if(go){ const f=fields.find(x=>x.id===go); if(f){ map.fitBounds(L.polygon(f.coords).getBounds().pad(0.3)); closeSheets(); } }
+    if(del){ if(confirm('Feld wirklich löschen?')) delField(del); }
+  };
+  $('#histBody').onclick=e=>{ const id=e.target.getAttribute('data-show'); if(id) showSession(id); };
+
+  $('#obstBtn').onclick=()=>openSheet('obstSheet');
+  $('#obstPick').onclick=e=>{ const btn=e.target.closest('button'); if(btn) addObstacle(btn.getAttribute('data-t')); };
+  $('#nightSw').onclick=toggleNight;
+
+  $('#locBtn').onclick=()=>{
+    if(!navigator.geolocation){ alert('Kein GPS verfügbar.'); return; }
+    follow=true;
+    navigator.geolocation.getCurrentPosition(p=>{
+      map.setView([p.coords.latitude,p.coords.longitude],18);
+      updatePosMarker(p.coords.latitude,p.coords.longitude);
+    }, ()=>alert('Standort nicht verfügbar. Auf dem Handy per HTTPS öffnen und Standort erlauben.'), {enableHighAccuracy:true});
+  };
+});
+</script>
+</body>
+</html>
