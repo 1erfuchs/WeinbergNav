@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Reihen-Navigator</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#12161c">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
@@ -118,6 +122,27 @@
   /* Night mode dims the imagery so covered/uncovered pops */
   body.night .leaflet-tile{filter:brightness(.42) contrast(1.12) saturate(.7)}
   body.night #map{background:#05070a}
+
+  /* Edit mode */
+  #editbar{position:absolute;left:0;right:0;bottom:0;z-index:1050;display:none;
+    gap:8px;padding:10px 10px calc(10px + env(safe-area-inset-bottom));
+    background:linear-gradient(#12161c00,#12161cf5 40%)}
+  #editbar.show{display:flex}
+  #edithint{position:absolute;top:60px;left:12px;right:12px;z-index:1100;display:none;
+    background:#1b212bf2;border:1px solid var(--cyan);border-radius:12px;padding:10px 12px;font-size:12.5px;line-height:1.4}
+  #edithint.show{display:block}
+  #edithint b{color:var(--cyan)}
+  .vtx{width:18px;height:18px;border-radius:50%;background:var(--gold);
+    border:2px solid #12161c;box-shadow:0 0 0 1px var(--gold)}
+  .vtx-mid{width:12px;height:12px;border-radius:50%;background:#12161c;border:2px dashed var(--gold);opacity:.85}
+
+  /* Task chips */
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:4px 0 10px}
+  .chip{border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+    border-radius:20px;padding:9px 13px;font-size:13.5px;cursor:pointer;white-space:nowrap}
+  .chip.sel{background:var(--gold);color:#1a1305;border-color:var(--gold);font-weight:700}
+  .task-tag{display:inline-block;background:#2c3444;border:1px solid var(--line);color:var(--cyan);
+    border-radius:6px;padding:1px 6px;font-size:11.5px;font-weight:600;margin-right:5px}
 </style>
 </head>
 <body>
@@ -148,6 +173,13 @@
   <button class="btn primary" id="driveBtn"><span class="ic">▶</span>Fahrt<br>starten</button>
   <button class="btn" id="histBtn"><span class="ic">☰</span>Historie</button>
   <button class="btn" id="setBtn"><span class="ic">⚙</span>Breite</button>
+</div>
+
+<div id="edithint"><b>Punkte bearbeiten:</b> goldene Punkte verschieben · auf einen Punkt tippen = löschen · gestrichelten Zwischenpunkt ziehen = neuer Eckpunkt.</div>
+
+<div id="editbar">
+  <button class="btn warn" id="editCancel"><span class="ic">✕</span>Abbrechen</button>
+  <button class="btn primary" id="editSave"><span class="ic">✓</span>Speichern</button>
 </div>
 
 <div class="backdrop" id="backdrop"></div>
@@ -182,6 +214,63 @@
       <div class="lab">Nachtmodus<br><span style="color:var(--muted);font-size:12px">Luftbild abdunkeln, Spur hervorheben</span></div>
       <div class="sw" id="nightSw"></div>
     </div>
+
+    <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+      <div style="font-size:15px;font-weight:600;margin-bottom:6px">Datensicherung</div>
+      <p style="color:var(--muted);font-size:13px;line-height:1.5;margin:0 0 10px">
+        Alle Daten liegen nur auf diesem Handy. Sichere sie regelmäßig als Datei –
+        so gehen sie bei Handywechsel oder gelöschten Browserdaten nicht verloren.
+      </p>
+      <p id="dataInfo" style="color:var(--gold);font-size:13.5px;font-weight:600;margin:0 0 10px"></p>
+      <div class="pick">
+        <button id="expBtn"><span class="e">⬇</span>Exportieren</button>
+        <button id="impBtn"><span class="e">⬆</span>Importieren</button>
+      </div>
+      <input type="file" id="impFile" accept=".json,application/json" style="display:none">
+      <p id="impMsg" style="font-size:13px;line-height:1.45;margin:8px 2px 0;color:var(--muted)"></p>
+    </div>
+  </div>
+</div>
+
+<!-- Task picker sheet -->
+<div class="sheet" id="taskSheet">
+  <h2>Welche Arbeit? <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin:2px 0 8px">
+      Kurz antippen – erscheint später in der Historie. Das Feld erkennt die App selbst.
+    </p>
+    <div class="chips" id="taskChips"></div>
+    <label class="field"><span>Zusatz (optional)</span>
+      <input type="text" id="taskExtra" placeholder="z. B. 6. Durchgang" autocomplete="off">
+    </label>
+    <button class="btn primary" style="border-radius:14px" id="taskGo">Fahrt starten</button>
+    <button class="btn" style="border-radius:14px;margin-top:8px" id="taskSkip">Ohne Thema starten</button>
+  </div>
+</div>
+
+<!-- Field rename sheet -->
+<div class="sheet" id="renameSheet">
+  <h2>Feld umbenennen <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <label class="field"><span>Name</span>
+      <input type="text" id="renameInput" autocomplete="off">
+    </label>
+    <button class="btn primary" style="border-radius:14px" id="renameGo">Speichern</button>
+  </div>
+</div>
+
+<!-- History edit sheet -->
+<div class="sheet" id="hEditSheet">
+  <h2>Eintrag bearbeiten <span class="x" data-close>×</span></h2>
+  <div class="body">
+    <div class="chips" id="hTaskChips"></div>
+    <label class="field"><span>Zusatz</span>
+      <input type="text" id="hTaskExtra" placeholder="z. B. 6. Durchgang" autocomplete="off">
+    </label>
+    <label class="field"><span>Feld</span>
+      <select id="hFieldSel" style="width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);font-size:15px"></select>
+    </label>
+    <button class="btn primary" style="border-radius:14px" id="hEditGo">Speichern</button>
   </div>
 </div>
 
@@ -244,6 +333,11 @@ let coverageLayer = L.layerGroup();
 let obstacleLayer = L.layerGroup();
 let posMarker = null;
 let recStart=0, lastPos=null, lastT=0, distM=0, statsTimer=null, lastSpeed=0;
+let pendingTask='';
+let editing=null;        // {field, coords, handles:[], mids:[], poly}
+let renameId=null, hEditId=null, hTaskSel='';
+
+const TASKS = ['Spritzen','Laubschneiden','Mulchen','Ausbrechen','Heften','Gipfeln','Bodenbearbeitung','Düngen','Ernte','Sonstiges'];
 
 let drawing=false, drawPts=[], drawMarkers=[], drawLine=null;
 let recording=false, track=[], recWatch=null, currentField=null, simTimer=null;
@@ -266,11 +360,12 @@ function initMap(){
 
 /* ---------- Felder rendern ---------- */
 function renderFields(){
+  if(editing) return;
   fieldLayers.clearLayers();
   fields.forEach(f=>{
     const poly = L.polygon(f.coords,{color:'#e0b34a',weight:2,fillColor:'#e0b34a',fillOpacity:.10}).addTo(fieldLayers);
     const c = poly.getBounds().getCenter();
-    L.marker(c,{icon:L.divIcon({className:'',html:`<div class="field-label">${f.name} · ${fmt(f.ha)} ha</div>`,iconSize:[0,0]})}).addTo(fieldLayers);
+    L.marker(c,{icon:L.divIcon({className:'',html:`<div class="field-label">${esc(f.name)} · ${fmt(f.ha)} ha</div>`,iconSize:[0,0]})}).addTo(fieldLayers);
   });
 }
 
@@ -286,6 +381,7 @@ function toggleDraw(){
   setStatus('Feld zeichnen','Eckpunkte auf die Karte tippen');
 }
 function onMapClick(e){
+  if(editing) return;
   if(!drawing) return;
   drawPts.push([e.latlng.lat,e.latlng.lng]);
   const m=L.circleMarker(e.latlng,{radius:6,color:'#e0b34a',fillColor:'#12161c',fillOpacity:1,weight:2}).addTo(fieldLayers);
@@ -325,16 +421,91 @@ async function confirmSave(){
   if(map.getZoom()<15) map.fitBounds(L.polygon(f.coords).getBounds().pad(0.3));
 }
 
+/* ---------- Feld bearbeiten (Punkte verschieben/löschen/einfügen) ---------- */
+function startEdit(id){
+  const f=fields.find(x=>x.id===id); if(!f) return;
+  closeSheets();
+  if(recording) stopDriveNoSave();
+  if(drawing) finishDraw();
+  editing={ field:f, coords:f.coords.map(c=>[c[0],c[1]]), handles:[], mids:[], poly:null };
+  fieldLayers.clearLayers();
+  $('#edithint').classList.add('show');
+  $('#editbar').classList.add('show');
+  $('#toolbar').style.display='none';
+  map.fitBounds(L.polygon(editing.coords).getBounds().pad(0.35));
+  renderEdit();
+  setStatus('Bearbeiten: '+f.name, fmt(polyHa(editing.coords))+' ha');
+}
+function renderEdit(){
+  if(!editing) return;
+  editing.handles.forEach(h=>map.removeLayer(h)); editing.handles=[];
+  editing.mids.forEach(h=>map.removeLayer(h)); editing.mids=[];
+  if(editing.poly) map.removeLayer(editing.poly);
+  editing.poly=L.polygon(editing.coords,{color:'#e0b34a',weight:2,fillColor:'#e0b34a',fillOpacity:.12}).addTo(map);
+
+  const vIcon=L.divIcon({className:'',html:'<div class="vtx"></div>',iconSize:[18,18],iconAnchor:[9,9]});
+  const mIcon=L.divIcon({className:'',html:'<div class="vtx-mid"></div>',iconSize:[12,12],iconAnchor:[6,6]});
+
+  editing.coords.forEach((c,i)=>{
+    const h=L.marker(c,{icon:vIcon,draggable:true,zIndexOffset:1000}).addTo(map);
+    h.on('drag',e=>{ const ll=e.target.getLatLng(); editing.coords[i]=[ll.lat,ll.lng];
+      editing.poly.setLatLngs(editing.coords); liveHa(); });
+    h.on('dragend',()=>renderEdit());
+    h.on('click',()=>{
+      if(editing.coords.length<=3){ setStatus('Mindestens 3 Punkte','Punkt kann nicht gelöscht werden'); return; }
+      editing.coords.splice(i,1); renderEdit();
+    });
+    editing.handles.push(h);
+  });
+
+  editing.coords.forEach((c,i)=>{
+    const n=editing.coords[(i+1)%editing.coords.length];
+    const mid=[(c[0]+n[0])/2,(c[1]+n[1])/2];
+    const h=L.marker(mid,{icon:mIcon,draggable:true,zIndexOffset:900}).addTo(map);
+    let added=false;
+    h.on('dragstart',()=>{ if(!added){ editing.coords.splice(i+1,0,mid); added=true; } });
+    h.on('drag',e=>{ const ll=e.target.getLatLng(); editing.coords[i+1]=[ll.lat,ll.lng];
+      editing.poly.setLatLngs(editing.coords); liveHa(); });
+    h.on('dragend',()=>renderEdit());
+    editing.mids.push(h);
+  });
+  liveHa();
+}
+function liveHa(){ if(editing) setStatus('Bearbeiten: '+editing.field.name, fmt(polyHa(editing.coords))+' ha'); }
+function endEdit(){
+  if(!editing) return;
+  editing.handles.forEach(h=>map.removeLayer(h));
+  editing.mids.forEach(h=>map.removeLayer(h));
+  if(editing.poly) map.removeLayer(editing.poly);
+  editing=null;
+  $('#edithint').classList.remove('show');
+  $('#editbar').classList.remove('show');
+  $('#toolbar').style.display='flex';
+  renderFields();
+}
+async function saveEdit(){
+  if(!editing) return;
+  const f=editing.field;
+  f.coords=editing.coords.map(c=>[c[0],c[1]]);
+  f.ha=polyHa(f.coords);
+  await store.set('field:'+f.id, JSON.stringify(f));
+  const name=f.name, ha=f.ha;
+  endEdit();
+  setStatus('Feld gespeichert','<b>'+name+'</b> · '+fmt(ha)+' ha');
+}
+
 /* ---------- Felder-Liste ---------- */
 function openFields(){
   const b=$('#fieldsBody');
   if(!fields.length){ b.innerHTML='<div class="empty">Noch keine Felder.<br>Tippe unten auf „Feld zeichnen“ und setze die Eckpunkte auf der Karte.</div>'; }
   else{
     b.innerHTML = fields.map(f=>`
-      <div class="row">
+      <div class="row" style="flex-wrap:wrap">
         <div class="swatch" style="background:#e0b34a"></div>
-        <div class="grow"><div class="name">${f.name}</div><div class="sub">${fmt(f.ha)} ha</div></div>
+        <div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${fmt(f.ha)} ha · ${f.coords.length} Punkte</div></div>
         <button class="mini" data-go="${f.id}">Zeigen</button>
+        <button class="mini" data-edit="${f.id}">Punkte</button>
+        <button class="mini" data-ren="${f.id}">Name</button>
         <button class="mini danger" data-del="${f.id}">Löschen</button>
       </div>`).join('');
   }
@@ -344,6 +515,18 @@ async function delField(id){
   fields = fields.filter(f=>f.id!==id);
   await store.del('field:'+id);
   renderFields(); openFields();
+}
+function esc(s){ return String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])); }
+function openRename(id){
+  const f=fields.find(x=>x.id===id); if(!f) return;
+  renameId=id; $('#renameInput').value=f.name; openSheet('renameSheet');
+}
+async function doRename(){
+  const f=fields.find(x=>x.id===renameId); if(!f) return;
+  const n=($('#renameInput').value||'').trim(); if(!n) return;
+  f.name=n;
+  await store.set('field:'+f.id, JSON.stringify(f));
+  renderFields(); closeSheets(); openFields();
 }
 
 /* ---------- Fahrt / Aufzeichnung ---------- */
@@ -356,7 +539,27 @@ function setDrive(on){
 }
 function toggleDrive(){
   if(recording){ stopDrive(); return; }
-  startDrive();
+  openTaskPicker();
+}
+function openTaskPicker(){
+  if(editing) return;
+  hTaskSel = hTaskSel || '';
+  let sel = '';
+  $('#taskChips').innerHTML = TASKS.map(t=>`<div class="chip" data-t="${esc(t)}">${esc(t)}</div>`).join('');
+  $('#taskChips').onclick=e=>{
+    const c=e.target.closest('.chip'); if(!c) return;
+    $('#taskChips').querySelectorAll('.chip').forEach(x=>x.classList.remove('sel'));
+    c.classList.add('sel'); sel=c.getAttribute('data-t');
+    $('#taskChips')._sel=sel;
+  };
+  $('#taskChips')._sel='';
+  $('#taskExtra').value='';
+  openSheet('taskSheet');
+}
+function taskLabel(){
+  const base=$('#taskChips')._sel||'';
+  const ex=($('#taskExtra').value||'').trim();
+  return [base,ex].filter(Boolean).join(' · ');
 }
 function startDrive(){
   if(drawing) finishDraw();
@@ -367,7 +570,7 @@ function startDrive(){
   $('#stats').classList.add('show');
   statsTimer=setInterval(()=>updateStats(lastSpeed), 1000);
   updateStats(0);
-  setStatus('Aufzeichnung läuft','Suche Standort …');
+  setStatus('Aufzeichnung läuft', pendingTask ? esc(pendingTask)+' · Suche Standort …' : 'Suche Standort …');
   if(navigator.geolocation){
     recWatch = navigator.geolocation.watchPosition(onPos, geoErr,
       {enableHighAccuracy:true, maximumAge:1000, timeout:15000});
@@ -456,9 +659,12 @@ async function finishRecording(save){
     const s = { id:'s'+Date.now(), date:new Date().toISOString(),
       fieldId: currentField?currentField.id:null,
       fieldName: currentField?currentField.name:'Ohne Feld',
+      task: pendingTask||'',
+      distM: Math.round(distM),
+      durS: Math.round((Date.now()-recStart)/1000),
       track: track.slice(), width: settings.width };
     await store.set('session:'+s.id, JSON.stringify(s));
-    setStatus('Fahrt gespeichert','<b>'+s.fieldName+'</b> · '+new Date().toLocaleDateString('de-DE'));
+    setStatus('Fahrt gespeichert','<b>'+esc(s.fieldName)+'</b> · '+new Date().toLocaleDateString('de-DE'));
   } else {
     setStatus('Bereit','Fahrt beendet');
   }
@@ -517,15 +723,18 @@ async function openHistory(){
   const groups={};
   sessions.forEach(s=>{ const d=new Date(s.date).toLocaleDateString('de-DE',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
     (groups[d]=groups[d]||[]).push(s); });
-  b.innerHTML = Object.entries(groups).map(([day,list])=>`
-    <div class="daygroup"><div class="dh">${day}</div>
-      ${list.map(s=>`<div class="row">
+  b.innerHTML = Object.entries(groups).map(([day,list])=>{
+    const dayHa = list.reduce((a,s)=>a+((s.distM||0)*(s.width||2)/10000),0);
+    return `<div class="daygroup"><div class="dh">${day} <span style="color:var(--muted);font-weight:400;font-size:12px">· ${fmt(dayHa)} ha</span></div>
+      ${list.map(s=>`<div class="row" style="flex-wrap:wrap">
         <div class="swatch" style="background:#39d3e0"></div>
-        <div class="grow"><div class="name">${s.fieldName}</div>
-          <div class="sub">${new Date(s.date).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})} Uhr · ${fmt(s.width).replace(/,00$/,'')} m Breite</div></div>
+        <div class="grow"><div class="name">${esc(s.fieldName)}</div>
+          <div class="sub">${s.task?`<span class="task-tag">${esc(s.task)}</span>`:''}${new Date(s.date).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})} Uhr · ${fmt((s.distM||0)*(s.width||2)/10000)} ha · ${fmt((s.distM||0)/1000)} km</div></div>
         <button class="mini" data-show='${s.id}'>Karte</button>
+        <button class="mini" data-hedit='${s.id}'>Ändern</button>
+        <button class="mini danger" data-hdel='${s.id}'>Löschen</button>
       </div>`).join('')}
-    </div>`).join('');
+    </div>`;}).join('');
   b._sessions = sessions;
   openSheet('histSheet');
 }
@@ -541,6 +750,118 @@ async function showSession(id){
   }catch(e){}
   closeSheets();
   setStatus('Historie: '+s.fieldName, new Date(s.date).toLocaleDateString('de-DE'));
+}
+
+/* ---------- Historie bearbeiten / löschen ---------- */
+async function delSession(id){
+  await store.del('session:'+id);
+  coverageLayer.clearLayers();
+  openHistory();
+}
+async function openHEdit(id){
+  const v=await store.get('session:'+id); if(!v) return;
+  const s=JSON.parse(v); hEditId=id;
+  const parts=(s.task||'').split(' · ');
+  const base=parts[0]||''; const extra=parts.slice(1).join(' · ');
+  $('#hTaskChips').innerHTML = TASKS.map(t=>`<div class="chip${t===base?' sel':''}" data-t="${esc(t)}">${esc(t)}</div>`).join('');
+  $('#hTaskChips')._sel=base;
+  $('#hTaskChips').onclick=e=>{
+    const c=e.target.closest('.chip'); if(!c) return;
+    $('#hTaskChips').querySelectorAll('.chip').forEach(x=>x.classList.remove('sel'));
+    c.classList.add('sel'); $('#hTaskChips')._sel=c.getAttribute('data-t');
+  };
+  $('#hTaskExtra').value=extra;
+  $('#hFieldSel').innerHTML = '<option value="">Ohne Feld</option>'+
+    fields.map(f=>`<option value="${f.id}"${f.id===s.fieldId?' selected':''}>${esc(f.name)}</option>`).join('');
+  openSheet('hEditSheet');
+}
+async function saveHEdit(){
+  const v=await store.get('session:'+hEditId); if(!v) return;
+  const s=JSON.parse(v);
+  const base=$('#hTaskChips')._sel||'';
+  const ex=($('#hTaskExtra').value||'').trim();
+  s.task=[base,ex].filter(Boolean).join(' · ');
+  const fid=$('#hFieldSel').value;
+  const f=fields.find(x=>x.id===fid);
+  s.fieldId = f?f.id:null; s.fieldName = f?f.name:'Ohne Feld';
+  await store.set('session:'+s.id, JSON.stringify(s));
+  closeSheets(); openHistory();
+}
+
+/* ---------- Export / Import ---------- */
+async function allSessions(){
+  const out=[];
+  for(const k of await store.list('session:')){
+    const v=await store.get(k); if(v){ try{ out.push(JSON.parse(v)); }catch(e){} }
+  }
+  return out;
+}
+async function updateDataInfo(){
+  const s=await allSessions();
+  $('#dataInfo').textContent = `${fields.length} Felder · ${s.length} Fahrten · ${obstacles.length} Hindernisse`;
+}
+async function doExport(){
+  try{
+    const data = {
+      app:'reihen-navigator', version:1,
+      exported: new Date().toISOString(),
+      settings, fields, obstacles,
+      sessions: await allSessions()
+    };
+    const blob = new Blob([JSON.stringify(data,null,1)], {type:'application/json'});
+    const d = new Date();
+    const stamp = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `reihen-navigator-${stamp}.json`;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    $('#impMsg').style.color='var(--ok)';
+    $('#impMsg').textContent = `Gesichert: ${data.fields.length} Felder, ${data.sessions.length} Fahrten. Datei liegt im Ordner „Downloads“ – kopiere sie am besten auf den PC oder in die Cloud.`;
+  }catch(e){
+    $('#impMsg').style.color='var(--danger)';
+    $('#impMsg').textContent='Export fehlgeschlagen: '+e.message;
+  }
+}
+function doImportPick(){ $('#impFile').value=''; $('#impFile').click(); }
+async function doImport(file){
+  const msg=$('#impMsg');
+  try{
+    const txt = await file.text();
+    const data = JSON.parse(txt);
+    if(!data || data.app!=='reihen-navigator' || !Array.isArray(data.fields)){
+      throw new Error('Das ist keine gültige Sicherungsdatei dieser App.');
+    }
+    const have = new Set(fields.map(f=>f.id));
+    const haveO = new Set(obstacles.map(o=>o.id));
+    const haveS = new Set((await allSessions()).map(s=>s.id));
+    let nf=0,no=0,ns=0;
+
+    for(const f of data.fields){
+      if(!f || !f.id || !Array.isArray(f.coords) || f.coords.length<3) continue;
+      if(have.has(f.id)) continue;
+      fields.push(f); await store.set('field:'+f.id, JSON.stringify(f)); nf++;
+    }
+    for(const o of (data.obstacles||[])){
+      if(!o || !o.id || typeof o.lat!=='number') continue;
+      if(haveO.has(o.id)) continue;
+      obstacles.push(o); await store.set('obstacle:'+o.id, JSON.stringify(o)); no++;
+    }
+    for(const s of (data.sessions||[])){
+      if(!s || !s.id || !Array.isArray(s.track)) continue;
+      if(haveS.has(s.id)) continue;
+      await store.set('session:'+s.id, JSON.stringify(s)); ns++;
+    }
+    renderFields(); renderObstacles(); await updateDataInfo();
+    msg.style.color='var(--ok)';
+    msg.textContent = (nf+no+ns)===0
+      ? 'Alles aus dieser Datei war bereits vorhanden – nichts geändert.'
+      : `Importiert: ${nf} Felder, ${ns} Fahrten, ${no} Hindernisse. Vorhandenes blieb unverändert.`;
+    if(nf && fields.length) map.fitBounds(L.polygon(fields[fields.length-1].coords).getBounds().pad(0.4));
+  }catch(e){
+    msg.style.color='var(--danger)';
+    msg.textContent='Import fehlgeschlagen: '+e.message;
+  }
 }
 
 /* ---------- Bildschirm anlassen ---------- */
@@ -626,7 +947,7 @@ window.addEventListener('DOMContentLoaded', ()=>{
   $('#driveBtn').onclick=toggleDrive;
   $('#fieldsBtn').onclick=openFields;
   $('#histBtn').onclick=openHistory;
-  $('#setBtn').onclick=()=>openSheet('setSheet');
+  $('#setBtn').onclick=()=>{ $('#impMsg').textContent=''; updateDataInfo(); openSheet('setSheet'); };
   $('#confirmSave').onclick=confirmSave;
   $('#backdrop').onclick=closeSheets;
   document.querySelectorAll('[data-close]').forEach(x=>x.onclick=closeSheets);
@@ -636,10 +957,30 @@ window.addEventListener('DOMContentLoaded', ()=>{
 
   $('#fieldsBody').onclick=e=>{
     const go=e.target.getAttribute('data-go'), del=e.target.getAttribute('data-del');
+    const ed=e.target.getAttribute('data-edit'), ren=e.target.getAttribute('data-ren');
     if(go){ const f=fields.find(x=>x.id===go); if(f){ map.fitBounds(L.polygon(f.coords).getBounds().pad(0.3)); closeSheets(); } }
+    if(ed) startEdit(ed);
+    if(ren) openRename(ren);
     if(del){ if(confirm('Feld wirklich löschen?')) delField(del); }
   };
-  $('#histBody').onclick=e=>{ const id=e.target.getAttribute('data-show'); if(id) showSession(id); };
+  $('#histBody').onclick=e=>{
+    const id=e.target.getAttribute('data-show');
+    const hd=e.target.getAttribute('data-hdel');
+    const he=e.target.getAttribute('data-hedit');
+    if(id) showSession(id);
+    if(he) openHEdit(he);
+    if(hd){ if(confirm('Diesen Eintrag wirklich löschen?')) delSession(hd); }
+  };
+
+  $('#editSave').onclick=saveEdit;
+  $('#editCancel').onclick=endEdit;
+  $('#expBtn').onclick=doExport;
+  $('#impBtn').onclick=doImportPick;
+  $('#impFile').onchange=e=>{ const f=e.target.files[0]; if(f) doImport(f); };
+  $('#renameGo').onclick=doRename;
+  $('#hEditGo').onclick=saveHEdit;
+  $('#taskGo').onclick=()=>{ pendingTask=taskLabel(); closeSheets(); startDrive(); };
+  $('#taskSkip').onclick=()=>{ pendingTask=''; closeSheets(); startDrive(); };
 
   $('#obstBtn').onclick=()=>openSheet('obstSheet');
   $('#obstPick').onclick=e=>{ const btn=e.target.closest('button'); if(btn) addObstacle(btn.getAttribute('data-t')); };
@@ -653,6 +994,10 @@ window.addEventListener('DOMContentLoaded', ()=>{
       updatePosMarker(p.coords.latitude,p.coords.longitude);
     }, ()=>alert('Standort nicht verfügbar. Auf dem Handy per HTTPS öffnen und Standort erlauben.'), {enableHighAccuracy:true});
   };
+
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(e=>console.warn('SW:',e));
+  }
 });
 </script>
 </body>
