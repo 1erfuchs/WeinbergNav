@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#12161C">
+
+    <org.osmdroid.views.MapView
+        android:id="@+id/map"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Statusleiste oben -->
+    <LinearLayout
+        android:id="@+id/topbar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#EE12161C"
+        android:padding="10dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/ready"
+            android:textColor="#E0B34A"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvSub"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#93A0B2"
+            android:textSize="12sp"
+            android:text="@string/sub_ready" />
+    </LinearLayout>
+
+    <!-- Live-Werte -->
+    <LinearLayout
+        android:id="@+id/stats"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        android:background="#DD1B212B"
+        android:padding="8dp"
+        app:layout_constraintTop_toBottomOf="@id/topbar"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView android:id="@+id/stTime" style="@style/Stat" />
+        <TextView android:id="@+id/stDist" style="@style/Stat" />
+        <TextView android:id="@+id/stSpeed" style="@style/Stat" />
+        <TextView android:id="@+id/stArea" style="@style/Stat" />
+    </LinearLayout>
+
+    <!-- Werkzeugleiste unten -->
+    <LinearLayout
+        android:id="@+id/toolbar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="#EE12161C"
+        android:padding="6dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <Button android:id="@+id/btnDrive" style="@style/Tool" android:text="@string/start" />
+        <Button android:id="@+id/btnNote"  style="@style/Tool" android:text="@string/note" />
+        <Button android:id="@+id/btnFields" style="@style/Tool" android:text="@string/fields" />
+        <Button android:id="@+id/btnHist"  style="@style/Tool" android:text="@string/history" />
+        <Button android:id="@+id/btnSet"   style="@style/Tool" android:text="@string/settings" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnLoc"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:text="@string/locate"
+        android:textSize="18sp"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="10dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/toolbar" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

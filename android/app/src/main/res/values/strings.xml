@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reihen-Navigator</string>
+    <string name="ready">Bereit</string>
+    <string name="sub_ready">Fahrt starten – das Feld erkennt die App selbst</string>
+    <string name="start">Start</string>
+    <string name="stop">Stopp</string>
+    <string name="note">Notiz</string>
+    <string name="fields">Felder</string>
+    <string name="history">Historie</string>
+    <string name="settings">Mehr</string>
+    <string name="locate">◎</string>
+</resources>
