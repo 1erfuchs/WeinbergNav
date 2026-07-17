@@ -1,0 +1,39 @@
+name: APK bauen
+
+on:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Java einrichten
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK einrichten
+        uses: android-actions/setup-android@v3
+
+      - name: Gradle einrichten
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: APK bauen
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: APK hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: reihen-navigator-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
