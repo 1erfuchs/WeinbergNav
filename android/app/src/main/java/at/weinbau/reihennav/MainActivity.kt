@@ -18,10 +18,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import at.weinbau.reihennav.databinding.ActivityMainBinding
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
@@ -38,6 +42,12 @@ class MainActivity : AppCompatActivity() {
 
     private var boundaryMode = false
     private val boundaryPts = mutableListOf<Pt>()
+
+    private var fused: FusedLocationProviderClient? = null
+    private var myPos: Pt? = null
+
+    /** Aktuelle Position: laufende Aufzeichnung hat Vorrang, sonst eigene Ortung */
+    private fun here(): Pt? = TrackingService.lastFix ?: myPos
 
     /** Luftbild von Esri - kein Schluessel noetig */
     private val esri = object : OnlineTileSourceBase(
@@ -87,15 +97,35 @@ class MainActivity : AppCompatActivity() {
         b.btnSet.setOnClickListener { settingsDialog() }
         b.btnLoc.setOnClickListener {
             follow = true
-            TrackingService.lastFix?.let { center(it) }
+            here()?.let { center(it) }
+            locateOnce()
         }
         b.map.setOnTouchListener { _, _ -> follow = false; false }
+
+        fused = LocationServices.getFusedLocationProviderClient(this)
 
         TrackingService.listener = { ui.post { refresh() } }
         requestPerms()
         drawStatic()
         Store.activeFields().firstOrNull()?.let { zoomTo(it) }
         refresh()
+    }
+
+    /** Holt einmalig eine frische Position (fuer den ◎-Knopf, ohne Aufzeichnung) */
+    @SuppressLint("MissingPermission")
+    private fun locateOnce() {
+        val f = fused ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) { toast("Standort-Berechtigung fehlt"); return }
+        toast("Suche Standort …")
+        f.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+            .addOnSuccessListener { loc ->
+                if (loc != null) {
+                    myPos = Pt(loc.latitude, loc.longitude)
+                    drawStatic(); if (follow) here()?.let { center(it) }
+                } else toast("Kein Signal – bist du unter freiem Himmel?")
+            }
+            .addOnFailureListener { toast("Ortung fehlgeschlagen: ${it.message}") }
     }
 
     // ---------- Berechtigungen ----------
@@ -169,10 +199,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Notizen ----------
+    /** Notiz-Knopf: an aktueller GPS-Position, sonst Hinweis zum Antippen der Karte */
     private fun addNoteDialog() {
-        val p = TrackingService.lastFix ?: Pt(
-            b.map.mapCenter.latitude, b.map.mapCenter.longitude
-        )
+        val p = here()
+        if (p == null) {
+            AlertDialog.Builder(this)
+                .setTitle("Keine Position")
+                .setMessage(
+                    "Es liegt noch keine GPS-Position vor. Tippe zuerst unten rechts auf ◎, " +
+                    "oder tippe lange auf die gewuenschte Stelle in der Karte, um dort eine " +
+                    "Notiz zu setzen."
+                )
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        noteDialog(p, "Notiz an deiner Position")
+    }
+
+    /** Notiz an einem beliebigen Punkt (langer Tipp auf die Karte) */
+    private fun noteDialog(p: Pt, title: String) {
         var pick = 0
         val txt = EditText(this).apply {
             hint = "Anmerkung (optional)"
@@ -180,7 +225,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(40, 20, 40, 20)
         }
         AlertDialog.Builder(this)
-            .setTitle("Notiz an dieser Position")
+            .setTitle(title)
             .setSingleChoiceItems(Note.KINDS.toTypedArray(), 0) { _, w -> pick = w }
             .setView(txt)
             .setPositiveButton("Speichern") { _, _ ->
@@ -196,6 +241,42 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Abbrechen", null)
             .show()
+    }
+
+    /** Tippen auf eine Notiz: bearbeiten, verschieben oder loeschen */
+    private fun noteActions(n: Note) {
+        val info = listOfNotNull(
+            n.kind,
+            n.text.ifBlank { null },
+            SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN).format(Date(n.createdAt))
+        ).joinToString("\n")
+        AlertDialog.Builder(this)
+            .setTitle("Notiz")
+            .setMessage(info)
+            .setItems(arrayOf("Text aendern", "Hierher verschieben (Kartenmitte)", "Loeschen")) { _, i ->
+                when (i) {
+                    0 -> {
+                        val e = EditText(this).apply { setText(n.text); setPadding(40, 20, 40, 20) }
+                        AlertDialog.Builder(this).setTitle("Text").setView(e)
+                            .setPositiveButton("Speichern") { _, _ ->
+                                n.text = e.text.toString().trim()
+                                n.updatedAt = System.currentTimeMillis()
+                                Store.saveNotes(); drawStatic()
+                            }.setNegativeButton("Abbrechen", null).show()
+                    }
+                    1 -> {
+                        n.lat = b.map.mapCenter.latitude
+                        n.lng = b.map.mapCenter.longitude
+                        n.updatedAt = System.currentTimeMillis()
+                        Store.saveNotes(); drawStatic()
+                        toast("Verschoben. Du kannst die Nadel auch direkt ziehen.")
+                    }
+                    2 -> {
+                        n.deleted = true; n.updatedAt = System.currentTimeMillis()
+                        Store.saveNotes(); drawStatic(); toast("Notiz geloescht")
+                    }
+                }
+            }.show()
     }
 
     // ---------- Felder ----------
@@ -426,6 +507,17 @@ class MainActivity : AppCompatActivity() {
     // ---------- Karte zeichnen ----------
     private fun drawStatic() {
         b.map.overlays.clear()
+
+        // Langer Tipp auf die Karte -> Notiz an dieser Stelle setzen
+        val events = MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint?) = false
+            override fun longPressHelper(p: GeoPoint?): Boolean {
+                if (p != null) noteDialog(Pt(p.latitude, p.longitude), "Notiz an dieser Stelle")
+                return true
+            }
+        })
+        b.map.overlays.add(events)
+
         for (f in Store.activeFields()) {
             val poly = Polygon(b.map).apply {
                 points = f.coords.map { GeoPoint(it.lat, it.lng) }
@@ -436,16 +528,55 @@ class MainActivity : AppCompatActivity() {
             }
             b.map.overlays.add(poly)
         }
+
         for (n in Store.activeNotes()) {
             val m = Marker(b.map).apply {
                 position = GeoPoint(n.lat, n.lng)
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                 title = n.kind
                 snippet = listOf(n.text, n.user).filter { it.isNotBlank() }.joinToString(" · ")
+                isDraggable = true
+                // Antippen -> Menue (bearbeiten / verschieben / loeschen)
+                setOnMarkerClickListener { _, _ -> noteActions(n); true }
+                setOnMarkerDragListener(object : Marker.OnMarkerDragListener {
+                    override fun onMarkerDrag(marker: Marker?) {}
+                    override fun onMarkerDragStart(marker: Marker?) {}
+                    override fun onMarkerDragEnd(marker: Marker?) {
+                        marker?.position?.let {
+                            n.lat = it.latitude; n.lng = it.longitude
+                            n.updatedAt = System.currentTimeMillis()
+                            Store.saveNotes()
+                        }
+                    }
+                })
             }
             b.map.overlays.add(m)
         }
+
+        // Eigene aktuelle Position als kleiner Punkt
+        here()?.let { p ->
+            val me = Marker(b.map).apply {
+                position = GeoPoint(p.lat, p.lng)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                icon = dotIcon()
+                setInfoWindow(null)
+                title = "Meine Position"
+            }
+            b.map.overlays.add(me)
+        }
+
         b.map.invalidate()
+    }
+
+    /** kleiner goldener Positionspunkt */
+    private fun dotIcon(): android.graphics.drawable.Drawable {
+        val s = (resources.displayMetrics.density * 16).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(s, s, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        p.color = 0xFF12161C.toInt(); c.drawCircle(s / 2f, s / 2f, s / 2f, p)
+        p.color = 0xFFE0B34A.toInt(); c.drawCircle(s / 2f, s / 2f, s / 2f - s * 0.18f, p)
+        return android.graphics.drawable.BitmapDrawable(resources, bmp)
     }
 
     /** Spurbreite massstabsgetreu: Meter -> Pixel beim aktuellen Zoom */

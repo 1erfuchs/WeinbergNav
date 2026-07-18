@@ -8,11 +8,17 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.location.Location
-import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import java.util.Locale
 
 /**
@@ -21,7 +27,7 @@ import java.util.Locale
  * Benachrichtigung, das ist der einzige Weg, den Android zuverlaessig
  * am Leben laesst.
  */
-class TrackingService : Service(), LocationListener {
+class TrackingService : Service() {
 
     companion object {
         const val CH = "tracking"
@@ -43,10 +49,16 @@ class TrackingService : Service(), LocationListener {
         fun notifyUi() = listener?.invoke()
     }
 
-    private var lm: LocationManager? = null
+    private var fused: FusedLocationProviderClient? = null
     private var wake: PowerManager.WakeLock? = null
     private var bt: BtNmea? = null
     private var ntrip: Ntrip? = null
+
+    private val locCb = object : LocationCallback() {
+        override fun onLocationResult(res: LocationResult) {
+            res.lastLocation?.let { onDeviceLocation(it) }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -103,18 +115,40 @@ class TrackingService : Service(), LocationListener {
             sourceText = "Handy-GPS"
         }
 
-        // Handy-GPS laeuft immer mit (Rueckfall, falls Bluetooth abreisst)
-        lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        runCatching {
-            lm?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
-        }
+        // Handy-GPS ueber den Fused-Dienst (GPS + WLAN + Sensoren kombiniert).
+        // Laeuft immer mit - auch als Rueckfall, falls Bluetooth abreisst.
+        startFused()
         notifyUi()
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startFused() {
+        try {
+            val client = LocationServices.getFusedLocationProviderClient(this)
+            fused = client
+            val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+                .setMinUpdateIntervalMillis(500L)
+                .setWaitForAccurateLocation(false)
+                .build()
+            client.requestLocationUpdates(req, locCb, Looper.getMainLooper())
+            // Sofort die letzte bekannte Position anzeigen, bis der erste Fix kommt
+            client.lastLocation.addOnSuccessListener { loc ->
+                if (loc != null && lastFix == null) onDeviceLocation(loc)
+            }
+            // Pruefen, ob der Ortungsdienst ueberhaupt an ist
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val on = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(true)
+            if (!on) { lastQuality = "Standort ist ausgeschaltet"; notifyUi() }
+        } catch (e: Exception) {
+            lastQuality = "GPS-Fehler: ${e.message}"
+            notifyUi()
+        }
     }
 
     private fun stopTracking() {
         if (!running) { stopSelf(); return }
         running = false
-        runCatching { lm?.removeUpdates(this) }
+        runCatching { fused?.removeLocationUpdates(locCb) }
         bt?.stop(); bt = null
         ntrip?.stop(); ntrip = null
         runCatching { if (wake?.isHeld == true) wake?.release() }
@@ -144,7 +178,7 @@ class TrackingService : Service(), LocationListener {
     }
 
     /** Position vom Handy-GPS - nur nutzen, wenn kein externer Empfaenger da ist */
-    override fun onLocationChanged(loc: Location) {
+    private fun onDeviceLocation(loc: Location) {
         if (bt?.connected == true) return
         lastQuality = "Handy-GPS (±${loc.accuracy.toInt()} m)"
         lastAccM = loc.accuracy.toDouble()
@@ -216,14 +250,9 @@ class TrackingService : Service(), LocationListener {
     }
 
     override fun onDestroy() {
-        runCatching { lm?.removeUpdates(this) }
+        runCatching { fused?.removeLocationUpdates(locCb) }
         bt?.stop(); ntrip?.stop()
         runCatching { if (wake?.isHeld == true) wake?.release() }
         super.onDestroy()
     }
-
-    override fun onProviderDisabled(provider: String) {}
-    override fun onProviderEnabled(provider: String) {}
-    @Deprecated("Deprecated in Java")
-    override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
 }
