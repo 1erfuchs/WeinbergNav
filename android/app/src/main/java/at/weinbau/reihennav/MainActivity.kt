@@ -195,7 +195,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopDrive() {
         startService(Intent(this, TrackingService::class.java).setAction(TrackingService.ACTION_STOP))
-        ui.postDelayed({ drawStatic(); refresh() }, 700)
+        ui.postDelayed({ drawStatic(); refresh(); if (Sync.configured) autoSync() }, 700)
     }
 
     // ---------- Notizen ----------
@@ -248,12 +248,13 @@ class MainActivity : AppCompatActivity() {
         val info = listOfNotNull(
             n.kind,
             n.text.ifBlank { null },
+            if (n.user.isNotBlank()) "von ${n.user}" else null,
             SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN).format(Date(n.createdAt))
         ).joinToString("\n")
         AlertDialog.Builder(this)
             .setTitle("Notiz")
             .setMessage(info)
-            .setItems(arrayOf("Text aendern", "Hierher verschieben (Kartenmitte)", "Loeschen")) { _, i ->
+            .setItems(arrayOf("✏\uFE0F  Text ändern", "\uD83D\uDCCD  Hierher verschieben (Kartenmitte)", "\uD83D\uDDD1\uFE0F  Löschen")) { _, i ->
                 when (i) {
                     0 -> {
                         val e = EditText(this).apply { setText(n.text); setPadding(40, 20, 40, 20) }
@@ -271,10 +272,12 @@ class MainActivity : AppCompatActivity() {
                         Store.saveNotes(); drawStatic()
                         toast("Verschoben. Du kannst die Nadel auch direkt ziehen.")
                     }
-                    2 -> {
-                        n.deleted = true; n.updatedAt = System.currentTimeMillis()
-                        Store.saveNotes(); drawStatic(); toast("Notiz geloescht")
-                    }
+                    2 -> AlertDialog.Builder(this)
+                        .setMessage("Notiz \"${n.kind}\" wirklich löschen?")
+                        .setPositiveButton("Löschen") { _, _ ->
+                            n.deleted = true; n.updatedAt = System.currentTimeMillis()
+                            Store.saveNotes(); drawStatic(); toast("Notiz gelöscht")
+                        }.setNegativeButton("Abbrechen", null).show()
                 }
             }.show()
     }
@@ -362,7 +365,8 @@ class MainActivity : AppCompatActivity() {
         for (s in ss) {
             val day = df.format(Date(s.startedAt))
             if (day != lastDay) { lastDay = day }
-            lines.add("$day  ${tf.format(Date(s.startedAt))}\n${s.fieldName} · ${s.task.ifBlank { "ohne Thema" }} · ${fmt(s.ha)} ha")
+            val who = if (s.user.isNotBlank()) "  ·  ${s.user}" else ""
+            lines.add("$day  ${tf.format(Date(s.startedAt))}\n${s.fieldName} · ${s.task.ifBlank { "ohne Thema" }} · ${fmt(s.ha)} ha$who")
             refs.add(s)
         }
         AlertDialog.Builder(this)
@@ -373,14 +377,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sessionActions(s: Session) {
+        val sub = listOfNotNull(
+            s.task.ifBlank { null },
+            "${fmt(s.ha)} ha",
+            if (s.user.isNotBlank()) "von ${s.user}" else null
+        ).joinToString(" · ")
         AlertDialog.Builder(this)
             .setTitle(s.fieldName)
-            .setItems(arrayOf("Auf Karte zeigen", "Loeschen")) { _, i ->
+            .setMessage(sub)
+            .setItems(arrayOf("Auf Karte zeigen", "Löschen")) { _, i ->
                 when (i) {
                     0 -> { drawStatic(); drawTrack(s.track, s.widthM); s.track.firstOrNull()?.let { center(it) } }
                     1 -> {
                         s.deleted = true; s.updatedAt = System.currentTimeMillis()
-                        Store.saveSessions(); drawStatic(); toast("Eintrag geloescht")
+                        Store.saveSessions(); drawStatic(); toast("Eintrag gelöscht")
                     }
                 }
             }.show()
@@ -388,9 +398,12 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Einstellungen ----------
     private fun settingsDialog() {
+        val konto = if (Sync.configured) "Server: angemeldet als ${Store.user}" else "Server & Konto: nicht verbunden"
         val items = arrayOf(
             "Arbeitsbreite: ${fmt(Store.widthM)} m",
             "Benutzer: ${Store.user}",
+            konto,
+            "Jetzt synchronisieren",
             "GPS-Empfaenger: ${if (Store.btMac.isBlank()) "Handy-GPS" else Store.btName}",
             "RTK-Korrekturdienst (NTRIP)",
             "Daten exportieren",
@@ -402,12 +415,65 @@ class MainActivity : AppCompatActivity() {
                 when (i) {
                     0 -> widthDialog()
                     1 -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
-                    2 -> btDialog()
-                    3 -> ntripDialog()
-                    4 -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
-                    5 -> openFile.launch(arrayOf("application/json", "*/*"))
+                    2 -> serverDialog()
+                    3 -> syncNow()
+                    4 -> btDialog()
+                    5 -> ntripDialog()
+                    6 -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
+                    7 -> openFile.launch(arrayOf("application/json", "*/*"))
                 }
             }.setPositiveButton("Schliessen", null).show()
+    }
+
+    private fun serverDialog() {
+        if (Sync.configured) {
+            AlertDialog.Builder(this)
+                .setTitle("Server")
+                .setMessage("Angemeldet als ${Store.user}\nServer: ${Store.serverUrl}")
+                .setPositiveButton("Jetzt synchronisieren") { _, _ -> syncNow() }
+                .setNeutralButton("Abmelden") { _, _ -> Sync.logout(); toast("Abgemeldet") }
+                .setNegativeButton("Schliessen", null).show()
+            return
+        }
+        val ll = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 20, 40, 10) }
+        fun fld(hint: String, v: String, pw: Boolean = false): EditText {
+            val e = EditText(this).apply {
+                this.hint = hint; setText(v)
+                if (pw) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            ll.addView(e); return e
+        }
+        val srv = fld("Serveradresse, z. B. https://deinserver.at/rn/api", Store.serverUrl.ifBlank { "https://" })
+        val usr = fld("Dein Name", Store.user.takeIf { it != "Ich" } ?: "")
+        val pw = fld("Passwort", "", true)
+        AlertDialog.Builder(this)
+            .setTitle("Server & Konto")
+            .setView(ScrollView(this).apply { addView(ll) })
+            .setPositiveButton("Anmelden") { _, _ ->
+                val s = srv.text.toString().trim()
+                val u = usr.text.toString().trim()
+                val p = pw.text.toString()
+                if (s.isBlank() || u.isBlank() || p.isBlank()) { toast("Bitte alles ausfüllen"); return@setPositiveButton }
+                if (!s.startsWith("https://")) { toast("Adresse muss mit https:// beginnen"); return@setPositiveButton }
+                toast("Melde an …")
+                Sync.login(s, u, p) { okLogin, msg ->
+                    ui.post {
+                        toast(msg)
+                        if (okLogin) syncNow()
+                    }
+                }
+            }
+            .setNegativeButton("Abbrechen", null).show()
+    }
+
+    private fun syncNow() {
+        if (!Sync.configured) { toast("Erst unter Server & Konto anmelden"); return }
+        Sync.sync { changed, msg ->
+            ui.post {
+                toast(msg)
+                if (changed) { drawStatic(); refresh() }
+            }
+        }
     }
 
     private fun widthDialog() {
@@ -534,9 +600,9 @@ class MainActivity : AppCompatActivity() {
                 position = GeoPoint(n.lat, n.lng)
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                 title = n.kind
-                snippet = listOf(n.text, n.user).filter { it.isNotBlank() }.joinToString(" · ")
                 isDraggable = true
-                // Antippen -> Menue (bearbeiten / verschieben / loeschen)
+                setInfoWindow(null)   // keine Standard-Sprechblase -> Tipp oeffnet mein Menue
+                // Kurz antippen -> Menue (bearbeiten / verschieben / loeschen)
                 setOnMarkerClickListener { _, _ -> noteActions(n); true }
                 setOnMarkerDragListener(object : Marker.OnMarkerDragListener {
                     override fun onMarkerDrag(marker: Marker?) {}
@@ -651,6 +717,12 @@ class MainActivity : AppCompatActivity() {
         b.map.onResume()
         TrackingService.listener = { ui.post { refresh() } }
         refresh()
+        // Beim Öffnen automatisch mit dem Server abgleichen (falls eingerichtet)
+        if (Sync.configured && !TrackingService.running) autoSync()
+    }
+
+    private fun autoSync() {
+        Sync.sync { changed, _ -> if (changed) ui.post { drawStatic(); refresh() } }
     }
 
     override fun onPause() {

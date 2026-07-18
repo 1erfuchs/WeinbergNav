@@ -24,6 +24,8 @@ object Store {
     var btName: String = ""
     var serverUrl: String = ""
     var serverToken: String = ""
+    var syncSince: Long = 0
+    var lastPush: Long = 0
     var ntripHost: String = ""
     var ntripPort: Int = 2101
     var ntripMount: String = ""
@@ -47,6 +49,8 @@ object Store {
             btName = p.getString("btName", "") ?: ""
             serverUrl = p.getString("serverUrl", "") ?: ""
             serverToken = p.getString("serverToken", "") ?: ""
+            syncSince = p.getLong("syncSince", 0)
+            lastPush = p.getLong("lastPush", 0)
             ntripHost = p.getString("ntripHost", "") ?: ""
             ntripPort = p.getInt("ntripPort", 2101)
             ntripMount = p.getString("ntripMount", "") ?: ""
@@ -67,6 +71,8 @@ object Store {
             .putString("btName", btName)
             .putString("serverUrl", serverUrl)
             .putString("serverToken", serverToken)
+            .putLong("syncSince", syncSince)
+            .putLong("lastPush", lastPush)
             .putString("ntripHost", ntripHost)
             .putInt("ntripPort", ntripPort)
             .putString("ntripMount", ntripMount)
