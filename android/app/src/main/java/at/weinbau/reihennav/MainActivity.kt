@@ -250,11 +250,10 @@ class MainActivity : AppCompatActivity() {
             n.text.ifBlank { null },
             if (n.user.isNotBlank()) "von ${n.user}" else null,
             SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN).format(Date(n.createdAt))
-        ).joinToString("\n")
+        ).joinToString(" · ")
         AlertDialog.Builder(this)
-            .setTitle("Notiz")
-            .setMessage(info)
-            .setItems(arrayOf("✏\uFE0F  Text ändern", "\uD83D\uDCCD  Hierher verschieben (Kartenmitte)", "\uD83D\uDDD1\uFE0F  Löschen")) { _, i ->
+            .setTitle("Notiz\n$info")
+            .setItems(arrayOf("Text ändern", "Hierher verschieben (Kartenmitte)", "Löschen")) { _, i ->
                 when (i) {
                     0 -> {
                         val e = EditText(this).apply { setText(n.text); setPadding(40, 20, 40, 20) }
@@ -262,24 +261,27 @@ class MainActivity : AppCompatActivity() {
                             .setPositiveButton("Speichern") { _, _ ->
                                 n.text = e.text.toString().trim()
                                 n.updatedAt = System.currentTimeMillis()
-                                Store.saveNotes(); drawStatic()
+                                Store.saveNotes(); if (Sync.configured) autoSync(); drawStatic()
                             }.setNegativeButton("Abbrechen", null).show()
                     }
                     1 -> {
                         n.lat = b.map.mapCenter.latitude
                         n.lng = b.map.mapCenter.longitude
                         n.updatedAt = System.currentTimeMillis()
-                        Store.saveNotes(); drawStatic()
+                        Store.saveNotes(); if (Sync.configured) autoSync(); drawStatic()
                         toast("Verschoben. Du kannst die Nadel auch direkt ziehen.")
                     }
                     2 -> AlertDialog.Builder(this)
+                        .setTitle("Notiz löschen")
                         .setMessage("Notiz \"${n.kind}\" wirklich löschen?")
                         .setPositiveButton("Löschen") { _, _ ->
                             n.deleted = true; n.updatedAt = System.currentTimeMillis()
-                            Store.saveNotes(); drawStatic(); toast("Notiz gelöscht")
+                            Store.saveNotes(); if (Sync.configured) autoSync(); drawStatic(); toast("Notiz gelöscht")
                         }.setNegativeButton("Abbrechen", null).show()
                 }
-            }.show()
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
     }
 
     // ---------- Felder ----------
@@ -383,17 +385,18 @@ class MainActivity : AppCompatActivity() {
             if (s.user.isNotBlank()) "von ${s.user}" else null
         ).joinToString(" · ")
         AlertDialog.Builder(this)
-            .setTitle(s.fieldName)
-            .setMessage(sub)
+            .setTitle(s.fieldName + if (sub.isNotBlank()) "\n$sub" else "")
             .setItems(arrayOf("Auf Karte zeigen", "Löschen")) { _, i ->
                 when (i) {
-                    0 -> { drawStatic(); drawTrack(s.track, s.widthM); s.track.firstOrNull()?.let { center(it) } }
+                    0 -> { drawStatic(); drawTrack(s.track, s.widthM); s.track.firstOrNull()?.let { center(it) }; toast(if (s.track.isEmpty()) "Keine Spur aufgezeichnet" else "Auf Karte angezeigt") }
                     1 -> {
                         s.deleted = true; s.updatedAt = System.currentTimeMillis()
-                        Store.saveSessions(); drawStatic(); toast("Eintrag gelöscht")
+                        Store.saveSessions(); if (Sync.configured) autoSync(); drawStatic(); toast("Eintrag gelöscht")
                     }
                 }
-            }.show()
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
     }
 
     // ---------- Einstellungen ----------

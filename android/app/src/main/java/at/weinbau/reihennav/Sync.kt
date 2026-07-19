@@ -69,6 +69,7 @@ object Sync {
 
                 // 1. PUSH-Nutzlast: lokal seit lastPush geaenderte Datensaetze
                 val payload = JSONObject()
+                payload.put("token", Store.serverToken)   // Notfall-Token (falls Header geschluckt wird)
                 payload.put("since", Store.syncSince)
                 payload.put("fields", changedArray(Store.fields.map { it.toJson() to it.updatedAt }))
                 payload.put("sessions", changedArray(Store.sessions.map { it.toJson() to it.updatedAt }))
