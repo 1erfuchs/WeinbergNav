@@ -757,7 +757,7 @@ class MainActivity : AppCompatActivity() {
         if (t.isDone(f.id)) {
             AlertDialog.Builder(this)
                 .setTitle(t.title)
-                .setMessage("Für „${f.name}" bereits erledigt. Wieder auf offen setzen?")
+                .setMessage("Für \"${f.name}\" bereits erledigt. Wieder auf offen setzen?")
                 .setPositiveButton("Auf offen setzen") { _, _ ->
                     t.done.remove(f.id); t.updatedAt = System.currentTimeMillis()
                     Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
@@ -767,11 +767,11 @@ class MainActivity : AppCompatActivity() {
             t.done[f.id] = DoneMark(System.currentTimeMillis(), Store.user)
             t.updatedAt = System.currentTimeMillis()
             Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
-            toast("„${t.title}" für ${f.name} erledigt")
+            toast("\"${t.title}\" für ${f.name} erledigt")
         }
     }
 
-    /** Aufgaben-Menü (im „Mehr"-Menü) */
+    /** Aufgaben-Menue (im Mehr-Menue) */
     private fun tasksMenu() {
         val open = Store.activeTasks().count { t ->
             val ids = t.appliesTo(Store.activeFields().map { it.id })
@@ -820,7 +820,7 @@ class MainActivity : AppCompatActivity() {
                 if (Sync.configured) autoSync()
                 drawStatic()
                 val n = if (chosen.isEmpty()) fields.size else chosen.size
-                toast("Aufgabe „$ti" für $n Feld${if (n != 1) "er" else ""} angelegt")
+                toast("Aufgabe \"$ti\" für $n Feld${if (n != 1) "er" else ""} angelegt")
             }
             .setNegativeButton("Abbrechen", null).show()
     }
@@ -866,7 +866,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Schließen", null)
             .setNegativeButton("Aufgabe löschen") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Löschen")
-                    .setMessage("Aufgabe „${t.title}" wirklich löschen?")
+                    .setMessage("Aufgabe \"${t.title}\" wirklich löschen?")
                     .setPositiveButton("Löschen") { _, _ ->
                         t.deleted = true; t.updatedAt = System.currentTimeMillis()
                         Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic(); toast("Aufgabe gelöscht")
