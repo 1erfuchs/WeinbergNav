@@ -74,6 +74,7 @@ object Sync {
                 payload.put("fields", changedArray(Store.fields.map { it.toJson() to it.updatedAt }))
                 payload.put("sessions", changedArray(Store.sessions.map { it.toJson() to it.updatedAt }))
                 payload.put("notes", changedArray(Store.notes.map { it.toJson() to it.updatedAt }))
+                payload.put("tasks", changedArray(Store.tasks.map { it.toJson() to it.updatedAt }))
 
                 val (code, text) = post(base() + "/sync.php", payload.toString(), Store.serverToken)
                 if (code == 401) { busy = false; onDone(false, "Sitzung abgelaufen – neu anmelden"); return@thread }
@@ -88,11 +89,12 @@ object Sync {
                 changed = mergeFields(j.optJSONArray("fields")) { s -> if (s > maxSrv) maxSrv = s } || changed
                 changed = mergeSessions(j.optJSONArray("sessions")) { s -> if (s > maxSrv) maxSrv = s } || changed
                 changed = mergeNotes(j.optJSONArray("notes")) { s -> if (s > maxSrv) maxSrv = s } || changed
+                changed = mergeTasks(j.optJSONArray("tasks")) { s -> if (s > maxSrv) maxSrv = s } || changed
 
                 Store.syncSince = maxSrv
                 Store.lastPush = t0
                 Store.savePrefs()
-                if (changed) { Store.saveFields(); Store.saveSessions(); Store.saveNotes() }
+                if (changed) { Store.saveFields(); Store.saveSessions(); Store.saveNotes(); Store.saveTasks() }
 
                 busy = false
                 val pushed = j.optInt("pushed", 0)
@@ -155,6 +157,22 @@ object Sync {
             if (cur == null) { Store.notes.add(inc); changed = true }
             else if (inc.updatedAt > cur.updatedAt) {
                 Store.notes[Store.notes.indexOf(cur)] = inc; changed = true
+            }
+        }
+        return changed
+    }
+
+    private fun mergeTasks(arr: JSONArray?, onSrv: (Long) -> Unit): Boolean {
+        if (arr == null) return false
+        var changed = false
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            onSrv(o.optLong("_srv", 0))
+            val inc = Task.fromJson(o)
+            val cur = Store.tasks.firstOrNull { it.id == inc.id }
+            if (cur == null) { Store.tasks.add(inc); changed = true }
+            else if (inc.updatedAt > cur.updatedAt) {
+                Store.tasks[Store.tasks.indexOf(cur)] = inc; changed = true
             }
         }
         return changed

@@ -16,6 +16,7 @@ object Store {
     var fields = mutableListOf<Field>()
     var sessions = mutableListOf<Session>()
     var notes = mutableListOf<Note>()
+    var tasks = mutableListOf<Task>()
 
     var widthM: Double = 2.0
     var night: Boolean = false
@@ -60,6 +61,7 @@ object Store {
         fields = readList("fields.json") { Field.fromJson(it) }
         sessions = readList("sessions.json") { Session.fromJson(it) }
         notes = readList("notes.json") { Note.fromJson(it) }
+        tasks = readList("tasks.json") { Task.fromJson(it) }
     }
 
     fun savePrefs() {
@@ -105,10 +107,18 @@ object Store {
     fun saveFields() = writeList("fields.json", JSONArray().also { a -> fields.forEach { a.put(it.toJson()) } })
     fun saveSessions() = writeList("sessions.json", JSONArray().also { a -> sessions.forEach { a.put(it.toJson()) } })
     fun saveNotes() = writeList("notes.json", JSONArray().also { a -> notes.forEach { a.put(it.toJson()) } })
+    fun saveTasks() = writeList("tasks.json", JSONArray().also { a -> tasks.forEach { a.put(it.toJson()) } })
 
     fun activeFields() = fields.filter { !it.deleted }
     fun activeSessions() = sessions.filter { !it.deleted }
     fun activeNotes() = notes.filter { !it.deleted }
+    fun activeTasks() = tasks.filter { !it.deleted }
+
+    /** offene Aufgaben für ein bestimmtes Feld */
+    fun openTasksFor(fieldId: String): List<Task> {
+        val allIds = activeFields().map { it.id }
+        return activeTasks().filter { fieldId in it.appliesTo(allIds) && !it.isDone(fieldId) }
+    }
 
     fun fieldAt(p: Pt): Field? = activeFields().firstOrNull { Geo.inside(p, it.coords) }
     fun fieldById(id: String?): Field? = id?.let { i -> fields.firstOrNull { it.id == i } }
@@ -125,6 +135,7 @@ object Store {
         put("fields", JSONArray().also { a -> fields.forEach { a.put(it.toJson()) } })
         put("sessions", JSONArray().also { a -> sessions.forEach { a.put(it.toJson()) } })
         put("notes", JSONArray().also { a -> notes.forEach { a.put(it.toJson()) } })
+        put("tasks", JSONArray().also { a -> tasks.forEach { a.put(it.toJson()) } })
     }.toString(1)
 
     /**
@@ -194,7 +205,16 @@ object Store {
             }
         }
 
-        saveFields(); saveSessions(); saveNotes()
+        val ta = o.optJSONArray("tasks") ?: JSONArray()
+        for (i in 0 until ta.length()) {
+            runCatching {
+                val to = ta.getJSONObject(i)
+                if (tasks.any { it.id == to.getString("id") }) return@runCatching
+                tasks.add(Task.fromJson(to))
+            }
+        }
+
+        saveFields(); saveSessions(); saveNotes(); saveTasks()
         return Triple(nf, ns, nn)
     }
 }

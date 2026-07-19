@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
         b.map.controller.setCenter(GeoPoint(48.21, 16.37))
 
         b.btnDrive.setOnClickListener { if (TrackingService.running) stopDrive() else askTask() }
-        b.btnNote.setOnClickListener { addNoteDialog() }
+        b.btnNote.setOnClickListener { noteMenu() }
         b.btnFields.setOnClickListener { fieldsDialog() }
         b.btnHist.setOnClickListener { historyDialog() }
         b.btnSet.setOnClickListener { settingsDialog() }
@@ -199,6 +199,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Notizen ----------
+    private fun noteMenu() {
+        val n = Store.activeNotes().size
+        AlertDialog.Builder(this)
+            .setTitle("Notizen")
+            .setItems(arrayOf("Neue Notiz an meiner Position", "Alle Notizen anzeigen ($n)")) { _, i ->
+                if (i == 0) addNoteDialog() else notesListDialog()
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun notesListDialog() {
+        val notes = Store.activeNotes().sortedByDescending { it.createdAt }
+        if (notes.isEmpty()) { toast("Noch keine Notizen."); return }
+        val tf = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN)
+        val lines = notes.map { nt ->
+            val feld = Store.fieldById(nt.fieldId)?.name ?: "kein Feld"
+            val who = if (nt.user.isNotBlank()) " · ${nt.user}" else ""
+            "${nt.kind}${if (nt.text.isNotBlank()) ": ${nt.text}" else ""}\n$feld · ${tf.format(Date(nt.createdAt))}$who"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Alle Notizen (${notes.size})")
+            .setItems(lines) { _, i ->
+                val nt = notes[i]
+                b.map.controller.setZoom(18.0)
+                center(Pt(nt.lat, nt.lng))
+                noteActions(nt)
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
     /** Notiz-Knopf: an aktueller GPS-Position, sonst Hinweis zum Antippen der Karte */
     private fun addNoteDialog() {
         val p = here()
@@ -403,6 +435,7 @@ class MainActivity : AppCompatActivity() {
     private fun settingsDialog() {
         val konto = if (Sync.configured) "Server: angemeldet als ${Store.user}" else "Server & Konto: nicht verbunden"
         val items = arrayOf(
+            "Aufgaben verwalten",
             "Arbeitsbreite: ${fmt(Store.widthM)} m",
             "Benutzer: ${Store.user}",
             konto,
@@ -416,14 +449,15 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Einstellungen")
             .setItems(items) { _, i ->
                 when (i) {
-                    0 -> widthDialog()
-                    1 -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
-                    2 -> serverDialog()
-                    3 -> syncNow()
-                    4 -> btDialog()
-                    5 -> ntripDialog()
-                    6 -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
-                    7 -> openFile.launch(arrayOf("application/json", "*/*"))
+                    0 -> tasksMenu()
+                    1 -> widthDialog()
+                    2 -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
+                    3 -> serverDialog()
+                    4 -> syncNow()
+                    5 -> btDialog()
+                    6 -> ntripDialog()
+                    7 -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
+                    8 -> openFile.launch(arrayOf("application/json", "*/*"))
                 }
             }.setPositiveButton("Schliessen", null).show()
     }
@@ -588,14 +622,31 @@ class MainActivity : AppCompatActivity() {
         b.map.overlays.add(events)
 
         for (f in Store.activeFields()) {
+            val open = Store.openTasksFor(f.id).size
             val poly = Polygon(b.map).apply {
                 points = f.coords.map { GeoPoint(it.lat, it.lng) }
-                fillPaint.color = 0x1AE0B34A
-                outlinePaint.color = 0xFFE0B34A.toInt()
+                // Felder mit offenen Aufgaben werden hervorgehoben
+                fillPaint.color = if (open > 0) 0x3339D3E0 else 0x1AE0B34A
+                outlinePaint.color = if (open > 0) 0xFF39D3E0.toInt() else 0xFFE0B34A.toInt()
                 outlinePaint.strokeWidth = 3f
-                title = "${f.name} · ${fmt(f.ha)} ha"
+                title = f.name
+                setOnClickListener { _, _, _ -> fieldTasksDialog(f); true }
             }
             b.map.overlays.add(poly)
+
+            val center = GeoPoint(
+                f.coords.sumOf { it.lat } / f.coords.size,
+                f.coords.sumOf { it.lng } / f.coords.size
+            )
+            val badge = if (open > 0) "  ⚑$open" else ""
+            val lbl = Marker(b.map).apply {
+                position = center
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                icon = labelIcon("${f.name} · ${fmt(f.ha)} ha$badge", open > 0)
+                setInfoWindow(null)
+                setOnMarkerClickListener { _, _ -> fieldTasksDialog(f); true }
+            }
+            b.map.overlays.add(lbl)
         }
 
         for (n in Store.activeNotes()) {
@@ -646,6 +697,181 @@ class MainActivity : AppCompatActivity() {
         p.color = 0xFF12161C.toInt(); c.drawCircle(s / 2f, s / 2f, s / 2f, p)
         p.color = 0xFFE0B34A.toInt(); c.drawCircle(s / 2f, s / 2f, s / 2f - s * 0.18f, p)
         return android.graphics.drawable.BitmapDrawable(resources, bmp)
+    }
+
+    /** Textmarke für ein Feld (Name + ha, optional hervorgehoben bei offenen Aufgaben) */
+    private fun labelIcon(text: String, highlight: Boolean): android.graphics.drawable.Drawable {
+        val d = resources.displayMetrics.density
+        val tp = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt(); textSize = 12f * d
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val pad = (6 * d).toInt()
+        val w = (tp.measureText(text) + pad * 2).toInt()
+        val h = (tp.fontMetrics.let { it.descent - it.ascent } + pad * 2).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val cv = android.graphics.Canvas(bmp)
+        val bg = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0xCC12161C.toInt() }
+        val border = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            style = android.graphics.Paint.Style.STROKE; strokeWidth = 1.5f * d
+            color = if (highlight) 0xFF39D3E0.toInt() else 0xFFE0B34A.toInt()
+        }
+        val r = android.graphics.RectF(0.5f * d, 0.5f * d, w - 0.5f * d, h - 0.5f * d)
+        cv.drawRoundRect(r, 6f * d, 6f * d, bg)
+        cv.drawRoundRect(r, 6f * d, 6f * d, border)
+        cv.drawText(text, pad.toFloat(), pad - tp.fontMetrics.ascent, tp)
+        return android.graphics.drawable.BitmapDrawable(resources, bmp)
+    }
+
+    // ---------- Aufgaben ----------
+    /** Wird beim Antippen eines Feldes gezeigt: offene und erledigte Aufgaben */
+    private fun fieldTasksDialog(f: Field) {
+        val allIds = Store.activeFields().map { it.id }
+        val tasks = Store.activeTasks().filter { f.id in it.appliesTo(allIds) }
+            .sortedWith(compareBy({ it.isDone(f.id) }, { it.dueAt.takeIf { d -> d > 0 } ?: Long.MAX_VALUE }))
+        if (tasks.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(f.name)
+                .setMessage("Keine Aufgaben für dieses Feld.")
+                .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
+                .setNegativeButton("Schließen", null).show()
+            return
+        }
+        val labels = tasks.map { t ->
+            if (t.isDone(f.id)) {
+                val m = t.done[f.id]!!
+                "☑  ${t.title}   (erledigt ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " · ${m.by}" else ""})"
+            } else {
+                "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
+            }
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("${f.name} – Aufgaben")
+            .setItems(labels) { _, i -> toggleTaskDone(tasks[i], f) }
+            .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun toggleTaskDone(t: Task, f: Field) {
+        if (t.isDone(f.id)) {
+            AlertDialog.Builder(this)
+                .setTitle(t.title)
+                .setMessage("Für „${f.name}" bereits erledigt. Wieder auf offen setzen?")
+                .setPositiveButton("Auf offen setzen") { _, _ ->
+                    t.done.remove(f.id); t.updatedAt = System.currentTimeMillis()
+                    Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
+                }
+                .setNegativeButton("Abbrechen", null).show()
+        } else {
+            t.done[f.id] = DoneMark(System.currentTimeMillis(), Store.user)
+            t.updatedAt = System.currentTimeMillis()
+            Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
+            toast("„${t.title}" für ${f.name} erledigt")
+        }
+    }
+
+    /** Aufgaben-Menü (im „Mehr"-Menü) */
+    private fun tasksMenu() {
+        val open = Store.activeTasks().count { t ->
+            val ids = t.appliesTo(Store.activeFields().map { it.id })
+            ids.any { !t.isDone(it) }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Aufgaben")
+            .setItems(arrayOf("Neue Aufgabe anlegen", "Alle Aufgaben ($open offen)")) { _, i ->
+                if (i == 0) newTaskDialog() else allTasksDialog()
+            }
+            .setNegativeButton("Schließen", null).show()
+    }
+
+    private fun newTaskDialog(preselect: String? = null) {
+        val fields = Store.activeFields()
+        val ll = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 16, 40, 8) }
+        val title = EditText(this).apply {
+            hint = "Was ist zu tun? z. B. Laubschneiden"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
+        ll.addView(title)
+        val hint = TextView(this).apply {
+            text = "Für welche Felder? Nichts auswählen = alle Felder."
+            textSize = 12f; setPadding(0, 16, 0, 6)
+        }
+        ll.addView(hint)
+        val checks = fields.map { f ->
+            CheckBox(this).apply {
+                text = "${f.name} · ${fmt(f.ha)} ha"
+                isChecked = (preselect != null && f.id == preselect)
+            }.also { ll.addView(it) }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Neue Aufgabe")
+            .setView(ScrollView(this).apply { addView(ll) })
+            .setPositiveButton("Anlegen") { _, _ ->
+                val ti = title.text.toString().trim()
+                if (ti.isBlank()) { toast("Bitte einen Titel eingeben"); return@setPositiveButton }
+                val chosen = fields.filterIndexed { idx, _ -> checks[idx].isChecked }.map { it.id }.toMutableList()
+                val task = Task(
+                    id = Store.newId("t"), title = ti,
+                    fieldIds = chosen,             // leer = alle
+                    createdBy = Store.user, user = Store.user
+                )
+                Store.tasks.add(task); Store.saveTasks()
+                if (Sync.configured) autoSync()
+                drawStatic()
+                val n = if (chosen.isEmpty()) fields.size else chosen.size
+                toast("Aufgabe „$ti" für $n Feld${if (n != 1) "er" else ""} angelegt")
+            }
+            .setNegativeButton("Abbrechen", null).show()
+    }
+
+    private fun allTasksDialog() {
+        val tasks = Store.activeTasks().sortedByDescending { it.createdAt }
+        if (tasks.isEmpty()) { toast("Noch keine Aufgaben."); return }
+        val allIds = Store.activeFields().map { it.id }
+        val labels = tasks.map { t ->
+            val ids = t.appliesTo(allIds)
+            val done = ids.count { t.isDone(it) }
+            val scope = if (t.fieldIds.isEmpty()) "alle Felder" else "${t.fieldIds.size} Feld${if (t.fieldIds.size != 1) "er" else ""}"
+            "${t.title}\n$scope · erledigt $done/${ids.size}${if (t.createdBy.isNotBlank()) " · von ${t.createdBy}" else ""}"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Alle Aufgaben (${tasks.size})")
+            .setItems(labels) { _, i -> taskDetailDialog(tasks[i]) }
+            .setNegativeButton("Schließen", null).show()
+    }
+
+    private fun taskDetailDialog(t: Task) {
+        val allIds = Store.activeFields().map { it.id }
+        val ids = t.appliesTo(allIds)
+        val done = ids.count { t.isDone(it) }
+        val body = buildString {
+            append("Fortschritt: $done/${ids.size} Felder\n")
+            if (t.note.isNotBlank()) append("Notiz: ${t.note}\n")
+            append("\nErledigt:\n")
+            ids.filter { t.isDone(it) }.forEach { fid ->
+                val name = Store.fieldById(fid)?.name ?: "?"
+                val m = t.done[fid]!!
+                append("• $name – ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " (${m.by})" else ""}\n")
+            }
+            val openN = ids.filter { !t.isDone(it) }
+            if (openN.isNotEmpty()) {
+                append("\nOffen:\n")
+                openN.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(t.title)
+            .setMessage(body)
+            .setPositiveButton("Schließen", null)
+            .setNegativeButton("Aufgabe löschen") { _, _ ->
+                AlertDialog.Builder(this).setTitle("Löschen")
+                    .setMessage("Aufgabe „${t.title}" wirklich löschen?")
+                    .setPositiveButton("Löschen") { _, _ ->
+                        t.deleted = true; t.updatedAt = System.currentTimeMillis()
+                        Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic(); toast("Aufgabe gelöscht")
+                    }.setNegativeButton("Abbrechen", null).show()
+            }.show()
     }
 
     /** Spurbreite massstabsgetreu: Meter -> Pixel beim aktuellen Zoom */

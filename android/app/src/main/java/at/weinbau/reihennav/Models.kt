@@ -146,6 +146,75 @@ data class Note(
     }
 }
 
+/**
+ * Aufgabe (Arbeitsauftrag). Wird einem oder mehreren Feldern zugewiesen.
+ * Pro Feld wird der Erledigt-Status samt Zeitstempel und Person festgehalten,
+ * damit man auf der Karte sieht, wo eine Arbeit schon gemacht wurde.
+ *
+ * done:  fieldId -> {at: Zeitpunkt (ms), by: Name}  (nur erledigte Felder)
+ */
+data class Task(
+    var id: String,
+    var title: String,
+    var fieldIds: MutableList<String> = mutableListOf(),   // leer = alle Felder
+    var note: String = "",
+    var dueAt: Long = 0,                                    // 0 = keine Frist
+    var done: MutableMap<String, DoneMark> = mutableMapOf(),
+    var createdBy: String = "",
+    var createdAt: Long = System.currentTimeMillis(),
+    var user: String = "",
+    var updatedAt: Long = System.currentTimeMillis(),
+    var deleted: Boolean = false
+) {
+    /** betroffene Felder: leere Liste bedeutet "alle" */
+    fun appliesTo(allFieldIds: List<String>): List<String> =
+        if (fieldIds.isEmpty()) allFieldIds else fieldIds
+
+    fun isDone(fieldId: String) = done.containsKey(fieldId)
+
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("title", title); put("note", note)
+        put("dueAt", dueAt); put("createdBy", createdBy); put("createdAt", createdAt)
+        put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
+        put("fieldIds", JSONArray().also { a -> fieldIds.forEach { a.put(it) } })
+        put("done", JSONObject().also { d ->
+            done.forEach { (fid, m) -> d.put(fid, JSONObject().put("at", m.at).put("by", m.by)) }
+        })
+    }
+    companion object {
+        fun fromJson(o: JSONObject): Task {
+            val fids = mutableListOf<String>()
+            val fa = o.optJSONArray("fieldIds") ?: JSONArray()
+            for (i in 0 until fa.length()) fids.add(fa.getString(i))
+            val dm = mutableMapOf<String, DoneMark>()
+            val d = o.optJSONObject("done")
+            if (d != null) {
+                val keys = d.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val mo = d.getJSONObject(k)
+                    dm[k] = DoneMark(mo.optLong("at", 0), mo.optString("by", ""))
+                }
+            }
+            return Task(
+                id = o.getString("id"),
+                title = o.optString("title", "Aufgabe"),
+                fieldIds = fids,
+                note = o.optString("note", ""),
+                dueAt = o.optLong("dueAt", 0),
+                done = dm,
+                createdBy = o.optString("createdBy", ""),
+                createdAt = o.optLong("createdAt", 0),
+                user = o.optString("user", ""),
+                updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
+                deleted = o.optBoolean("deleted", false)
+            )
+        }
+    }
+}
+
+data class DoneMark(val at: Long, val by: String)
+
 /** Geometrie-Hilfen (ohne externe Bibliothek) */
 object Geo {
     const val R = 6371008.8
