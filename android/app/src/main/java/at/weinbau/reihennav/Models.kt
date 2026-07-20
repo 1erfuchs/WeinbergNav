@@ -20,12 +20,13 @@ data class Field(
     var name: String,
     var coords: MutableList<Pt>,
     var ha: Double = 0.0,
+    var bezirk: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
     var user: String = "",
     var deleted: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
-        put("id", id); put("name", name); put("ha", ha)
+        put("id", id); put("name", name); put("ha", ha); put("bezirk", bezirk)
         put("updatedAt", updatedAt); put("user", user); put("deleted", deleted)
         put("coords", JSONArray().also { arr ->
             coords.forEach { p -> arr.put(JSONArray().put(p.lat).put(p.lng)) }
@@ -44,6 +45,7 @@ data class Field(
                 name = o.optString("name", "Feld"),
                 coords = cs,
                 ha = o.optDouble("ha", 0.0),
+                bezirk = o.optString("bezirk", ""),
                 updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
                 user = o.optString("user", ""),
                 deleted = o.optBoolean("deleted", false)

@@ -329,9 +329,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fieldActions(f: Field) {
+        val titel = f.name + if (f.bezirk.isNotBlank()) " · Bezirk ${f.bezirk}" else ""
         AlertDialog.Builder(this)
-            .setTitle(f.name)
-            .setItems(arrayOf("Auf Karte zeigen", "Umbenennen", "Loeschen")) { _, i ->
+            .setTitle(titel)
+            .setItems(arrayOf("Auf Karte zeigen", "Umbenennen", "Bezirk festlegen", "Löschen")) { _, i ->
                 when (i) {
                     0 -> zoomTo(f)
                     1 -> {
@@ -340,14 +341,25 @@ class MainActivity : AppCompatActivity() {
                             .setPositiveButton("Speichern") { _, _ ->
                                 f.name = e.text.toString().trim().ifBlank { f.name }
                                 f.updatedAt = System.currentTimeMillis()
-                                Store.saveFields(); drawStatic()
+                                Store.saveFields(); if (Sync.configured) autoSync(); drawStatic()
                             }.setNegativeButton("Abbrechen", null).show()
                     }
-                    2 -> AlertDialog.Builder(this)
-                        .setMessage("Feld \"${f.name}\" wirklich loeschen?")
-                        .setPositiveButton("Loeschen") { _, _ ->
+                    2 -> {
+                        val e = EditText(this).apply {
+                            setText(f.bezirk); hint = "z. B. 21 oder 23"; setPadding(40, 20, 40, 20)
+                        }
+                        AlertDialog.Builder(this).setTitle("Bezirk").setView(e)
+                            .setPositiveButton("Speichern") { _, _ ->
+                                f.bezirk = e.text.toString().trim()
+                                f.updatedAt = System.currentTimeMillis()
+                                Store.saveFields(); if (Sync.configured) autoSync(); drawStatic()
+                            }.setNegativeButton("Abbrechen", null).show()
+                    }
+                    3 -> AlertDialog.Builder(this)
+                        .setMessage("Feld \"${f.name}\" wirklich löschen?")
+                        .setPositiveButton("Löschen") { _, _ ->
                             f.deleted = true; f.updatedAt = System.currentTimeMillis()
-                            Store.saveFields(); drawStatic()
+                            Store.saveFields(); if (Sync.configured) autoSync(); drawStatic()
                         }.setNegativeButton("Abbrechen", null).show()
                 }
             }.show()
