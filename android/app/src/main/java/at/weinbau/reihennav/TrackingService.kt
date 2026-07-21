@@ -238,8 +238,9 @@ class TrackingService : Service() {
         if (!markedInProgress.contains(f.id) && !markedDone.contains(f.id)) {
             if (fieldEnterAt > 0 && System.currentTimeMillis() - fieldEnterAt >= enterDelayMs) {
                 if (task.stateOf(f.id) == "offen") {
-                    task.done[f.id] = FieldMark("arbeit", System.currentTimeMillis(), Store.user)
-                    task.updatedAt = System.currentTimeMillis()
+                    val now = System.currentTimeMillis()
+                    task.done[f.id] = FieldMark("arbeit", now, Store.user, since = now)
+                    task.updatedAt = now
                     Store.saveTasks(); Store.syncTaskSoon()
                 }
                 markedInProgress.add(f.id)
@@ -252,8 +253,12 @@ class TrackingService : Service() {
             if (s.track.size % 15 == 0) {
                 val cov = Geo.coverage(f.coords, s.track, s.widthM)
                 if (cov >= doneThreshold) {
-                    task.done[f.id] = FieldMark("fertig", System.currentTimeMillis(), Store.user)
-                    task.updatedAt = System.currentTimeMillis()
+                    val now = System.currentTimeMillis()
+                    // Arbeitsbeginn erhalten: wurde das Feld vorher als "in Arbeit" markiert,
+                    // dessen since übernehmen; sonst jetzt (direkt erledigt).
+                    val since = task.done[f.id]?.since?.takeIf { it > 0 } ?: now
+                    task.done[f.id] = FieldMark("fertig", now, Store.user, since)
+                    task.updatedAt = now
                     Store.saveTasks(); Store.syncTaskSoon()
                     markedDone.add(f.id)
                     lastCoverage = 1.0

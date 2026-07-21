@@ -8,8 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.graphics.BitmapFactory
 import androidx.core.content.FileProvider
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import android.os.Build
 import android.os.Bundle
 import android.preference.PreferenceManager
@@ -286,13 +289,20 @@ class MainActivity : AppCompatActivity() {
             "Status: ${m.status}",
             if (m.fotos.isNotEmpty()) "${m.fotos.size} Foto(s)" else "Foto wird noch hochgeladen"
         ).joinToString("\n")
+        // Aktionen abhängig davon, ob schon ein Foto am Server liegt
+        val actions = mutableListOf<String>()
+        if (m.fotos.isNotEmpty()) actions.add(if (m.fotos.size > 1) "Fotos ansehen (${m.fotos.size})" else "Foto ansehen")
+        actions.add("Auf Karte zeigen")
+        actions.add("Status ändern")
+        actions.add("Löschen")
         AlertDialog.Builder(this)
             .setTitle("Meldung")
             .setMessage(info)
-            .setItems(arrayOf("Auf Karte zeigen", "Status ändern", "Löschen")) { _, i ->
-                when (i) {
-                    0 -> { m.let { b.map.controller.animateTo(org.osmdroid.util.GeoPoint(it.lat, it.lng)); b.map.controller.setZoom(18.0) } }
-                    1 -> {
+            .setItems(actions.toTypedArray()) { _, i ->
+                when (actions[i]) {
+                    "Foto ansehen", "Fotos ansehen (${m.fotos.size})" -> fotoAnsehen(m, 0)
+                    "Auf Karte zeigen" -> { b.map.controller.animateTo(org.osmdroid.util.GeoPoint(m.lat, m.lng)); b.map.controller.setZoom(18.0) }
+                    "Status ändern" -> {
                         val opt = arrayOf("neu", "gesehen", "erledigt")
                         AlertDialog.Builder(this).setTitle("Status")
                             .setItems(opt) { _, w ->
@@ -301,7 +311,7 @@ class MainActivity : AppCompatActivity() {
                                 toast("Status: ${opt[w]}")
                             }.show()
                     }
-                    2 -> AlertDialog.Builder(this)
+                    "Löschen" -> AlertDialog.Builder(this)
                         .setMessage("Meldung \"${m.art}\" wirklich löschen?")
                         .setPositiveButton("Löschen") { _, _ ->
                             m.deleted = true; m.updatedAt = System.currentTimeMillis()
@@ -311,6 +321,81 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Schließen", null)
             .show()
+    }
+
+    /**
+     * Foto einer Schadensmeldung anzeigen. Die Bilder liegen am Server unter
+     * .../api/fotos/<dateiname>. Sie werden im Hintergrund geladen, verkleinert
+     * und in einem Dialog gezeigt. Bei mehreren Fotos schaltet "Weiter" durch.
+     */
+    private fun fotoAnsehen(m: Meldung, index: Int) {
+        if (m.fotos.isEmpty()) { toast("Für diese Meldung ist noch kein Foto am Server."); return }
+        if (!Sync.configured) { toast("Kein Server verbunden – Foto kann nicht geladen werden."); return }
+        val i = ((index % m.fotos.size) + m.fotos.size) % m.fotos.size
+        val name = m.fotos[i]
+        val url = Store.serverUrl.trimEnd('/') + "/fotos/" + name
+
+        val iv = ImageView(this).apply {
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            minimumHeight = 480
+            setImageResource(android.R.drawable.ic_menu_gallery)
+        }
+        val status = TextView(this).apply { text = "Foto wird geladen …"; setPadding(24, 16, 24, 16); textSize = 13f }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(status); addView(iv) }
+
+        val zaehler = if (m.fotos.size > 1) "  (${i + 1}/${m.fotos.size})" else ""
+        val builder = AlertDialog.Builder(this)
+            .setTitle("${m.art}$zaehler")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Schließen", null)
+            .setNeutralButton("Im Browser öffnen") { _, _ ->
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    .onFailure { toast("Kein Browser gefunden") }
+            }
+        if (m.fotos.size > 1) builder.setNegativeButton("Weiter ▶", null) // Klick unten selbst behandeln
+        val dlg = builder.show()
+        // "Weiter" soll den Dialog NICHT schließen, sondern das nächste Foto zeigen
+        if (m.fotos.size > 1) {
+            dlg.getButton(AlertDialog.BUTTON_NEGATIVE)?.setOnClickListener {
+                dlg.dismiss(); fotoAnsehen(m, i + 1)
+            }
+        }
+
+        Thread {
+            val bmp = loadBitmap(url, Store.serverToken)
+            runOnUiThread {
+                if (!dlg.isShowing) return@runOnUiThread
+                if (bmp != null) { iv.setImageBitmap(bmp); status.visibility = View.GONE }
+                else { status.text = "Foto konnte nicht geladen werden.\nBesteht eine Internetverbindung?"; iv.setImageResource(android.R.drawable.ic_menu_report_image) }
+            }
+        }.start()
+    }
+
+    /** Bild von einer URL laden und auf max. ~1600 px verkleinern. Im Hintergrund aufrufen! */
+    private fun loadBitmap(url: String, token: String): android.graphics.Bitmap? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 20000; readTimeout = 60000
+                if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+            }
+            if (conn.responseCode !in 200..299) return null
+            val bytes = conn.inputStream.use { it.readBytes() }
+            // erst nur die Maße lesen, dann passend heruntergerechnet dekodieren (spart Speicher)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            val maxDim = 1600
+            while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        } catch (e: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     private fun notesListDialog() {
@@ -936,11 +1021,15 @@ class MainActivity : AppCompatActivity() {
             when (t.stateOf(f.id)) {
                 "fertig" -> {
                     val m = t.done[f.id]!!
-                    "☑  ${t.title}   (erledigt ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " · ${m.by}" else ""})"
+                    val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
+                    val zeit = if (m.since > 0 && m.since < m.at) "${tf.format(Date(m.since))} → ${tf.format(Date(m.at))}"
+                               else "erledigt ${tf.format(Date(m.at))}"
+                    "☑  ${t.title}   ($zeit${if (m.by.isNotBlank()) " · ${m.by}" else ""})"
                 }
                 "arbeit" -> {
                     val m = t.done[f.id]!!
-                    "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))})"
+                    val seit = if (m.since > 0) m.since else m.at
+                    "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(seit))})"
                 }
                 else -> "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
             }
@@ -960,9 +1049,14 @@ class MainActivity : AppCompatActivity() {
             "arbeit" -> "fertig"
             else -> "offen"
         }
+        val now = System.currentTimeMillis()
         if (next == "offen") t.done.remove(f.id)
-        else t.done[f.id] = FieldMark(next, System.currentTimeMillis(), Store.user)
-        t.updatedAt = System.currentTimeMillis()
+        else {
+            // Arbeitsbeginn (since) erhalten: beim Start = jetzt, beim Erledigen der bisherige Wert
+            val since = if (next == "arbeit") now else (t.done[f.id]?.since?.takeIf { it > 0 } ?: now)
+            t.done[f.id] = FieldMark(next, now, Store.user, since)
+        }
+        t.updatedAt = now
         Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
         val wort = when (next) { "arbeit" -> "in Arbeit"; "fertig" -> "erledigt"; else -> "offen" }
         toast("\"${t.title}\" für ${f.name}: $wort")
@@ -1048,17 +1142,29 @@ class MainActivity : AppCompatActivity() {
             val fertig = ids.filter { t.stateOf(it) == "fertig" }
             val arbeit = ids.filter { t.stateOf(it) == "arbeit" }
             val offen = ids.filter { t.stateOf(it) == "offen" }
+            val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
             if (fertig.isNotEmpty()) {
                 append("\nErledigt:\n")
                 fertig.forEach { fid ->
                     val name = Store.fieldById(fid)?.name ?: "?"
                     val m = t.done[fid]!!
-                    append("• $name – ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " (${m.by})" else ""}\n")
+                    val who = if (m.by.isNotBlank()) " (${m.by})" else ""
+                    // Start- und Endzeit, wenn ein Arbeitsbeginn bekannt ist
+                    if (m.since > 0 && m.since < m.at) {
+                        append("• $name – ${tf.format(Date(m.since))} → ${tf.format(Date(m.at))}$who\n")
+                    } else {
+                        append("• $name – ${tf.format(Date(m.at))}$who\n")
+                    }
                 }
             }
             if (arbeit.isNotEmpty()) {
                 append("\nIn Arbeit:\n")
-                arbeit.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
+                arbeit.forEach { fid ->
+                    val name = Store.fieldById(fid)?.name ?: "?"
+                    val m = t.done[fid]!!
+                    val seit = if (m.since > 0) m.since else m.at
+                    append("• $name – seit ${tf.format(Date(seit))}\n")
+                }
             }
             if (offen.isNotEmpty()) {
                 append("\nOffen:\n")
@@ -1068,6 +1174,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(t.title)
             .setMessage(body)
+            .setNeutralButton("▶ Fahrt starten") { _, _ -> startDriveForTask(t) }
             .setPositiveButton("Schließen", null)
             .setNegativeButton("Aufgabe löschen") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Löschen")
@@ -1077,6 +1184,26 @@ class MainActivity : AppCompatActivity() {
                         Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic(); toast("Aufgabe gelöscht")
                     }.setNegativeButton("Abbrechen", null).show()
             }.show()
+    }
+
+    /**
+     * Fahrt direkt aus einer Aufgabe heraus starten. Die GPS-Fahrt wird an die
+     * Aufgabe gekoppelt: befahrene Felder springen automatisch auf "in Arbeit"
+     * bzw. ab 90 % Abdeckung auf "erledigt".
+     */
+    private fun startDriveForTask(t: Task) {
+        if (TrackingService.running) {
+            AlertDialog.Builder(this)
+                .setTitle("Fahrt läuft bereits")
+                .setMessage("Es läuft schon eine Fahrt. Bitte zuerst beenden, dann aus der Aufgabe neu starten.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val label = listOf(t.typ, t.title).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { t.title }
+        startDrive(label, t.id)
+        // Karte auf das erste Feld der Aufgabe schwenken
+        val allIds = Store.activeFields().map { it.id }
+        t.appliesTo(allIds).firstNotNullOfOrNull { Store.fieldById(it) }?.let { zoomTo(it) }
     }
 
     /** Spurbreite massstabsgetreu: Meter -> Pixel beim aktuellen Zoom */

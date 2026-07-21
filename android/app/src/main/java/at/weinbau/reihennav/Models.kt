@@ -240,7 +240,7 @@ data class Task(
         put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
         put("fieldIds", JSONArray().also { a -> fieldIds.forEach { a.put(it) } })
         put("done", JSONObject().also { d ->
-            done.forEach { (fid, m) -> d.put(fid, JSONObject().put("state", m.state).put("at", m.at).put("by", m.by)) }
+            done.forEach { (fid, m) -> d.put(fid, JSONObject().put("state", m.state).put("at", m.at).put("by", m.by).put("since", m.since)) }
         })
     }
     companion object {
@@ -255,8 +255,9 @@ data class Task(
                 while (keys.hasNext()) {
                     val k = keys.next()
                     val mo = d.getJSONObject(k)
-                    // altes Format (nur at/by) -> state = fertig
-                    dm[k] = FieldMark(mo.optString("state", "fertig"), mo.optLong("at", 0), mo.optString("by", ""))
+                    // altes Format (nur at/by) -> state = fertig; since fällt auf at zurück
+                    val at = mo.optLong("at", 0)
+                    dm[k] = FieldMark(mo.optString("state", "fertig"), at, mo.optString("by", ""), mo.optLong("since", at))
                 }
             }
             return Task(
@@ -277,7 +278,16 @@ data class Task(
     }
 }
 
-data class FieldMark(val state: String, val at: Long, val by: String)
+/**
+ * Erledigungs-Vermerk eines Feldes in einer Aufgabe.
+ *  state = "arbeit" | "fertig"
+ *  at    = Zeitpunkt der letzten Statusänderung
+ *          (bei "arbeit" = Beginn, bei "fertig" = Ende der Arbeit)
+ *  since = Zeitpunkt, an dem das Feld erstmals auf "in Arbeit" ging.
+ *          Bleibt beim Wechsel auf "fertig" erhalten, damit Start- UND
+ *          Endzeit sichtbar sind. Fällt bei altem Datenbestand auf "at" zurück.
+ */
+data class FieldMark(val state: String, val at: Long, val by: String, val since: Long = at)
 
 /** Geometrie-Hilfen (ohne externe Bibliothek) */
 object Geo {
