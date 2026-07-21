@@ -283,24 +283,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun meldungActions(m: Meldung) {
-        val info = listOfNotNull(
-            m.art,
-            m.text.ifBlank { null },
-            "Status: ${m.status}",
-            if (m.fotos.isNotEmpty()) "${m.fotos.size} Foto(s)" else "Foto wird noch hochgeladen"
-        ).joinToString("\n")
-        // Aktionen abhängig davon, ob schon ein Foto am Server liegt
+        val statusWort = when (m.status) { "gesehen" -> "gesehen"; "erledigt" -> "erledigt"; else -> "neu" }
+        val titel = "${m.art} · $statusWort" + if (m.text.isNotBlank()) "\n${m.text.take(60)}" else ""
+        // WICHTIG: AlertDialog zeigt entweder eine Nachricht ODER eine Liste – daher
+        // die Infos in den Titel, damit die Aktionsliste (mit "Foto ansehen") erscheint.
         val actions = mutableListOf<String>()
-        if (m.fotos.isNotEmpty()) actions.add(if (m.fotos.size > 1) "Fotos ansehen (${m.fotos.size})" else "Foto ansehen")
+        if (m.fotos.isNotEmpty()) actions.add(if (m.fotos.size > 1) "📷 Fotos ansehen (${m.fotos.size})" else "📷 Foto ansehen")
+        else actions.add("(Foto wird noch hochgeladen)")
         actions.add("Auf Karte zeigen")
         actions.add("Status ändern")
         actions.add("Löschen")
         AlertDialog.Builder(this)
-            .setTitle("Meldung")
-            .setMessage(info)
+            .setTitle(titel)
             .setItems(actions.toTypedArray()) { _, i ->
                 when (actions[i]) {
-                    "Foto ansehen", "Fotos ansehen (${m.fotos.size})" -> fotoAnsehen(m, 0)
+                    "📷 Foto ansehen", "📷 Fotos ansehen (${m.fotos.size})" -> fotoAnsehen(m, 0)
+                    "(Foto wird noch hochgeladen)" -> toast("Das Foto ist noch nicht am Server. Bitte später synchronisieren.")
                     "Auf Karte zeigen" -> { b.map.controller.animateTo(org.osmdroid.util.GeoPoint(m.lat, m.lng)); b.map.controller.setZoom(18.0) }
                     "Status ändern" -> {
                         val opt = arrayOf("neu", "gesehen", "erledigt")
@@ -1136,25 +1134,26 @@ class MainActivity : AppCompatActivity() {
         val allIds = Store.activeFields().map { it.id }
         val ids = t.appliesTo(allIds)
         val done = ids.count { t.isDone(it) }
+        val fertig = ids.filter { t.stateOf(it) == "fertig" }
+        val arbeit = ids.filter { t.stateOf(it) == "arbeit" }
+        val offen = ids.filter { t.stateOf(it) == "offen" }
+        val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
         val body = buildString {
-            append("Fortschritt: $done/${ids.size} Felder\n")
+            append("Fortschritt: $done/${ids.size} Felder erledigt")
+            if (arbeit.isNotEmpty() || offen.isNotEmpty())
+                append("  ·  ${arbeit.size} in Arbeit · ${offen.size} offen")
+            append("\n")
             if (t.note.isNotBlank()) append("Notiz: ${t.note}\n")
-            val fertig = ids.filter { t.stateOf(it) == "fertig" }
-            val arbeit = ids.filter { t.stateOf(it) == "arbeit" }
-            val offen = ids.filter { t.stateOf(it) == "offen" }
-            val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
             if (fertig.isNotEmpty()) {
                 append("\nErledigt:\n")
                 fertig.forEach { fid ->
                     val name = Store.fieldById(fid)?.name ?: "?"
                     val m = t.done[fid]!!
                     val who = if (m.by.isNotBlank()) " (${m.by})" else ""
-                    // Start- und Endzeit, wenn ein Arbeitsbeginn bekannt ist
-                    if (m.since > 0 && m.since < m.at) {
+                    if (m.since > 0 && m.since < m.at)
                         append("• $name – ${tf.format(Date(m.since))} → ${tf.format(Date(m.at))}$who\n")
-                    } else {
+                    else
                         append("• $name – ${tf.format(Date(m.at))}$who\n")
-                    }
                 }
             }
             if (arbeit.isNotEmpty()) {
@@ -1166,17 +1165,25 @@ class MainActivity : AppCompatActivity() {
                     append("• $name – seit ${tf.format(Date(seit))}\n")
                 }
             }
-            if (offen.isNotEmpty()) {
-                append("\nOffen:\n")
-                offen.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
-            }
+            // Offene Felder nur als Anzahl (sonst füllen z. B. 24 Felder den Schirm)
+            if (offen.isNotEmpty()) append("\nOffen: ${offen.size} Feld${if (offen.size != 1) "er" else ""}\n")
         }
+
+        // Höhenbegrenzter Scrollbereich, damit die Knöpfe immer sichtbar bleiben
+        val tv = TextView(this).apply { text = body; setPadding(48, 24, 48, 16); textSize = 14f }
+        val scroll = object : ScrollView(this) {
+            override fun onMeasure(w: Int, h: Int) {
+                val cap = (resources.displayMetrics.heightPixels * 0.45).toInt()
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST))
+            }
+        }.apply { addView(tv) }
+
         AlertDialog.Builder(this)
             .setTitle(t.title)
-            .setMessage(body)
-            .setNeutralButton("▶ Fahrt starten") { _, _ -> startDriveForTask(t) }
-            .setPositiveButton("Schließen", null)
-            .setNegativeButton("Aufgabe löschen") { _, _ ->
+            .setView(scroll)
+            .setPositiveButton("▶ Fahrt starten") { _, _ -> startDriveForTask(t) }
+            .setNeutralButton("Schließen", null)
+            .setNegativeButton("Löschen") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Löschen")
                     .setMessage("Aufgabe \"${t.title}\" wirklich löschen?")
                     .setPositiveButton("Löschen") { _, _ ->
