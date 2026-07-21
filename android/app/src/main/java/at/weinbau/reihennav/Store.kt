@@ -17,6 +17,7 @@ object Store {
     var sessions = mutableListOf<Session>()
     var notes = mutableListOf<Note>()
     var tasks = mutableListOf<Task>()
+    var meldungen = mutableListOf<Meldung>()
 
     var widthM: Double = 2.0
     var night: Boolean = false
@@ -34,6 +35,7 @@ object Store {
     var ntripPass: String = ""
 
     private fun f(name: String) = File(ctx.filesDir, name)
+    fun filesDir(): File = ctx.filesDir
 
     fun init(c: Context) {
         ctx = c.applicationContext
@@ -62,6 +64,7 @@ object Store {
         sessions = readList("sessions.json") { Session.fromJson(it) }
         notes = readList("notes.json") { Note.fromJson(it) }
         tasks = readList("tasks.json") { Task.fromJson(it) }
+        meldungen = readList("meldungen.json") { Meldung.fromJson(it) }
     }
 
     fun savePrefs() {
@@ -108,11 +111,13 @@ object Store {
     fun saveSessions() = writeList("sessions.json", JSONArray().also { a -> sessions.forEach { a.put(it.toJson()) } })
     fun saveNotes() = writeList("notes.json", JSONArray().also { a -> notes.forEach { a.put(it.toJson()) } })
     fun saveTasks() = writeList("tasks.json", JSONArray().also { a -> tasks.forEach { a.put(it.toJson()) } })
+    fun saveMeldungen() = writeList("meldungen.json", JSONArray().also { a -> meldungen.forEach { a.put(it.toJson()) } })
 
     fun activeFields() = fields.filter { !it.deleted }
     fun activeSessions() = sessions.filter { !it.deleted }
     fun activeNotes() = notes.filter { !it.deleted }
     fun activeTasks() = tasks.filter { !it.deleted }
+    fun activeMeldungen() = meldungen.filter { !it.deleted }
 
     /** offene Aufgaben für ein bestimmtes Feld */
     fun openTasksFor(fieldId: String): List<Task> {
@@ -122,6 +127,17 @@ object Store {
 
     fun fieldAt(p: Pt): Field? = activeFields().firstOrNull { Geo.inside(p, it.coords) }
     fun fieldById(id: String?): Field? = id?.let { i -> fields.firstOrNull { it.id == i } }
+    fun taskById(id: String?): Task? = id?.let { i -> tasks.firstOrNull { it.id == i } }
+
+    /** Aufgaben-Änderung aus dem Hintergrund bald synchronisieren (throttled) */
+    private var lastTaskSync = 0L
+    fun syncTaskSoon() {
+        val now = System.currentTimeMillis()
+        if (Sync.configured && now - lastTaskSync > 20000L) {
+            lastTaskSync = now
+            Thread { runCatching { Sync.sync { _, _ -> } } }.start()
+        }
+    }
 
     fun newId(prefix: String) = prefix + System.currentTimeMillis() + "-" +
             (1000..9999).random()

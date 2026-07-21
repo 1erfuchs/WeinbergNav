@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.content.FileProvider
+import java.io.File
 import android.os.Build
 import android.os.Bundle
 import android.preference.PreferenceManager
@@ -74,6 +76,22 @@ class MainActivity : AppCompatActivity() {
     private val saveFile = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? -> uri?.let { doExport(it) } }
+
+    // Kamera: Foto wird in pendingPhotoFile aufgenommen; danach Meldungs-Dialog
+    private var pendingPhotoFile: File? = null
+    private var pendingPhotoPos: Pt? = null
+    private val takePhoto = registerForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { ok: Boolean ->
+        val file = pendingPhotoFile
+        if (ok && file != null && file.exists() && file.length() > 0) {
+            meldungDialog(pendingPhotoPos ?: here(), file)
+        } else {
+            pendingPhotoFile?.let { runCatching { it.delete() } }
+            pendingPhotoFile = null
+            toast("Kein Foto aufgenommen")
+        }
+    }
 
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
@@ -175,21 +193,45 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Welche Arbeit?")
             .setSingleChoiceItems(tasks, 0) { _, w -> pick = w }
             .setView(extra)
-            .setPositiveButton("Fahrt starten") { _, _ ->
+            .setPositiveButton("Weiter") { _, _ ->
                 val base = if (tasks[pick] == "Ohne Thema") "" else tasks[pick]
                 val ex = extra.text.toString().trim()
-                startDrive(listOf(base, ex).filter { it.isNotBlank() }.joinToString(" · "))
+                val label = listOf(base, ex).filter { it.isNotBlank() }.joinToString(" · ")
+                chooseTaskThenStart(label)
             }
             .setNegativeButton("Abbrechen", null)
             .show()
     }
 
-    private fun startDrive(task: String) {
+    /** Optional eine offene Aufgabe an die Fahrt koppeln (automatisches Abhaken) */
+    private fun chooseTaskThenStart(label: String) {
+        val allIds = Store.activeFields().map { it.id }
+        val offene = Store.activeTasks().filter { t ->
+            t.appliesTo(allIds).any { t.stateOf(it) != "fertig" }
+        }
+        if (offene.isEmpty()) { startDrive(label, null); return }
+        val namen = arrayOf("Keine Aufgabe koppeln") +
+            offene.map { it.title + (if (it.typ.isNotBlank()) " (${it.typ})" else "") }.toTypedArray()
+        var pick = 0
+        AlertDialog.Builder(this)
+            .setTitle("Aufgabe koppeln?")
+            .setSingleChoiceItems(namen, 0) { _, w -> pick = w }
+            .setPositiveButton("Fahrt starten") { _, _ ->
+                val taskId = if (pick == 0) null else offene[pick - 1].id
+                startDrive(label, taskId)
+            }
+            .setNegativeButton("Zurück", null)
+            .show()
+    }
+
+    private fun startDrive(task: String, taskId: String? = null) {
         val i = Intent(this, TrackingService::class.java)
             .setAction(TrackingService.ACTION_START)
             .putExtra(TrackingService.EXTRA_TASK, task)
+            .putExtra(TrackingService.EXTRA_TASK_ID, taskId)
         ContextCompat.startForegroundService(this, i)
         follow = true
+        if (taskId != null) toast("Aufgabe gekoppelt – befahrene Felder werden automatisch markiert")
         ui.postDelayed({ refresh() }, 500)
     }
 
@@ -201,10 +243,71 @@ class MainActivity : AppCompatActivity() {
     // ---------- Notizen ----------
     private fun noteMenu() {
         val n = Store.activeNotes().size
+        val md = Store.activeMeldungen().size
         AlertDialog.Builder(this)
-            .setTitle("Notizen")
-            .setItems(arrayOf("Neue Notiz an meiner Position", "Alle Notizen anzeigen ($n)")) { _, i ->
-                if (i == 0) addNoteDialog() else notesListDialog()
+            .setTitle("Notizen & Meldungen")
+            .setItems(arrayOf(
+                "Neue Notiz an meiner Position",
+                "\uD83D\uDCF7 Schadensmeldung mit Foto",
+                "Alle Notizen anzeigen ($n)",
+                "Alle Schadensmeldungen ($md)"
+            )) { _, i ->
+                when (i) {
+                    0 -> addNoteDialog()
+                    1 -> addMeldungPhoto()
+                    2 -> notesListDialog()
+                    3 -> meldungenListDialog()
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun meldungenListDialog() {
+        val list = Store.activeMeldungen().sortedByDescending { it.createdAt }
+        if (list.isEmpty()) { toast("Noch keine Schadensmeldungen."); return }
+        val tf = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN)
+        val labels = list.map { m ->
+            val st = when (m.status) { "gesehen" -> "gesehen"; "erledigt" -> "erledigt"; else -> "neu" }
+            val fotoInfo = if (m.fotos.isNotEmpty()) "\uD83D\uDCF7${m.fotos.size}" else "(Foto folgt)"
+            "${m.art} · $st · $fotoInfo\n${tf.format(Date(m.createdAt))}${if (m.text.isNotBlank()) " · " + m.text.take(30) else ""}"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Schadensmeldungen")
+            .setItems(labels) { _, i -> meldungActions(list[i]) }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun meldungActions(m: Meldung) {
+        val info = listOfNotNull(
+            m.art,
+            m.text.ifBlank { null },
+            "Status: ${m.status}",
+            if (m.fotos.isNotEmpty()) "${m.fotos.size} Foto(s)" else "Foto wird noch hochgeladen"
+        ).joinToString("\n")
+        AlertDialog.Builder(this)
+            .setTitle("Meldung")
+            .setMessage(info)
+            .setItems(arrayOf("Auf Karte zeigen", "Status ändern", "Löschen")) { _, i ->
+                when (i) {
+                    0 -> { m.let { b.map.controller.animateTo(org.osmdroid.util.GeoPoint(it.lat, it.lng)); b.map.controller.setZoom(18.0) } }
+                    1 -> {
+                        val opt = arrayOf("neu", "gesehen", "erledigt")
+                        AlertDialog.Builder(this).setTitle("Status")
+                            .setItems(opt) { _, w ->
+                                m.status = opt[w]; m.updatedAt = System.currentTimeMillis()
+                                Store.saveMeldungen(); if (Sync.configured) autoSync()
+                                toast("Status: ${opt[w]}")
+                            }.show()
+                    }
+                    2 -> AlertDialog.Builder(this)
+                        .setMessage("Meldung \"${m.art}\" wirklich löschen?")
+                        .setPositiveButton("Löschen") { _, _ ->
+                            m.deleted = true; m.updatedAt = System.currentTimeMillis()
+                            Store.saveMeldungen(); if (Sync.configured) autoSync(); drawStatic()
+                        }.setNegativeButton("Abbrechen", null).show()
+                }
             }
             .setNegativeButton("Schließen", null)
             .show()
@@ -275,7 +378,74 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Tippen auf eine Notiz: bearbeiten, verschieben oder loeschen */
+    /** Schadensmeldung mit Foto: Kamera starten (Position wird jetzt festgehalten) */
+    private fun addMeldungPhoto() {
+        val p = here()
+        if (p == null) {
+            AlertDialog.Builder(this)
+                .setTitle("Keine Position")
+                .setMessage("Es liegt noch keine GPS-Position vor. Tippe zuerst unten rechts auf \u25CE.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        pendingPhotoPos = p
+        val dir = File(Store.filesDir(), "fotos").apply { mkdirs() }
+        val file = File(dir, "m" + System.currentTimeMillis() + ".jpg")
+        pendingPhotoFile = file
+        val uri = try {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        } catch (e: Exception) {
+            toast("Kamera nicht verfuegbar: ${e.message}"); return
+        }
+        try {
+            takePhoto.launch(uri)
+        } catch (e: Exception) {
+            toast("Keine Kamera-App gefunden")
+        }
+    }
+
+    /** Nach der Aufnahme: Art + Text erfassen, Meldung anlegen, Foto hochladen */
+    private fun meldungDialog(p: Pt?, photo: File) {
+        var pick = 0
+        val txt = EditText(this).apply {
+            hint = "Beschreibung (optional)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setPadding(40, 20, 40, 20)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Schadensmeldung")
+            .setSingleChoiceItems(Meldung.ARTEN.toTypedArray(), 0) { _, w -> pick = w }
+            .setView(txt)
+            .setPositiveButton("Speichern") { _, _ ->
+                val pos = p ?: here() ?: Pt(0.0, 0.0)
+                val m = Meldung(
+                    id = Store.newId("md"),
+                    lat = pos.lat, lng = pos.lng,
+                    fieldId = Store.fieldAt(pos)?.id,
+                    art = Meldung.ARTEN[pick],
+                    text = txt.text.toString().trim(),
+                    status = "neu",
+                    user = Store.user
+                )
+                Store.meldungen.add(m); Store.saveMeldungen()
+                drawStatic()
+                // Foto im Hintergrund hochladen (mit Offline-Warteschlange)
+                Thread {
+                    runCatching { PhotoUpload.addAndUpload(m.id, photo.absolutePath) }
+                    runOnUiThread {
+                        toast(if (PhotoUpload.hasPending()) "Meldung gespeichert – Foto wird bei Verbindung hochgeladen"
+                              else "Meldung mit Foto gespeichert")
+                        drawStatic()
+                    }
+                }.start()
+                pendingPhotoFile = null
+            }
+            .setNegativeButton("Abbrechen") { _, _ ->
+                runCatching { photo.delete() }
+                pendingPhotoFile = null
+            }
+            .show()
+    }
     private fun noteActions(n: Note) {
         val info = listOfNotNull(
             n.kind,
@@ -685,6 +855,19 @@ class MainActivity : AppCompatActivity() {
             b.map.overlays.add(m)
         }
 
+        // Schadensmeldungen (rot, mit Kamera-Hinweis)
+        for (md in Store.activeMeldungen()) {
+            val marker = Marker(b.map).apply {
+                position = GeoPoint(md.lat, md.lng)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                title = md.art
+                setInfoWindow(null)
+                icon = labelIcon("\u26A0 ${md.art}", false).let { it }
+                setOnMarkerClickListener { _, _ -> meldungActions(md); true }
+            }
+            b.map.overlays.add(marker)
+        }
+
         // Eigene aktuelle Position als kleiner Punkt
         here()?.let { p ->
             val me = Marker(b.map).apply {
@@ -750,37 +933,39 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val labels = tasks.map { t ->
-            if (t.isDone(f.id)) {
-                val m = t.done[f.id]!!
-                "☑  ${t.title}   (erledigt ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " · ${m.by}" else ""})"
-            } else {
-                "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
+            when (t.stateOf(f.id)) {
+                "fertig" -> {
+                    val m = t.done[f.id]!!
+                    "☑  ${t.title}   (erledigt ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " · ${m.by}" else ""})"
+                }
+                "arbeit" -> {
+                    val m = t.done[f.id]!!
+                    "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))})"
+                }
+                else -> "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
             }
         }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("${f.name} – Aufgaben")
-            .setItems(labels) { _, i -> toggleTaskDone(tasks[i], f) }
+            .setItems(labels) { _, i -> cycleTaskState(tasks[i], f) }
             .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
             .setNegativeButton("Schließen", null)
             .show()
     }
 
-    private fun toggleTaskDone(t: Task, f: Field) {
-        if (t.isDone(f.id)) {
-            AlertDialog.Builder(this)
-                .setTitle(t.title)
-                .setMessage("Für \"${f.name}\" bereits erledigt. Wieder auf offen setzen?")
-                .setPositiveButton("Auf offen setzen") { _, _ ->
-                    t.done.remove(f.id); t.updatedAt = System.currentTimeMillis()
-                    Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
-                }
-                .setNegativeButton("Abbrechen", null).show()
-        } else {
-            t.done[f.id] = DoneMark(System.currentTimeMillis(), Store.user)
-            t.updatedAt = System.currentTimeMillis()
-            Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
-            toast("\"${t.title}\" für ${f.name} erledigt")
+    /** Status durchschalten: offen -> in Arbeit -> erledigt -> offen */
+    private fun cycleTaskState(t: Task, f: Field) {
+        val next = when (t.stateOf(f.id)) {
+            "offen" -> "arbeit"
+            "arbeit" -> "fertig"
+            else -> "offen"
         }
+        if (next == "offen") t.done.remove(f.id)
+        else t.done[f.id] = FieldMark(next, System.currentTimeMillis(), Store.user)
+        t.updatedAt = System.currentTimeMillis()
+        Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
+        val wort = when (next) { "arbeit" -> "in Arbeit"; "fertig" -> "erledigt"; else -> "offen" }
+        toast("\"${t.title}\" für ${f.name}: $wort")
     }
 
     /** Aufgaben-Menue (im Mehr-Menue) */
@@ -860,16 +1045,24 @@ class MainActivity : AppCompatActivity() {
         val body = buildString {
             append("Fortschritt: $done/${ids.size} Felder\n")
             if (t.note.isNotBlank()) append("Notiz: ${t.note}\n")
-            append("\nErledigt:\n")
-            ids.filter { t.isDone(it) }.forEach { fid ->
-                val name = Store.fieldById(fid)?.name ?: "?"
-                val m = t.done[fid]!!
-                append("• $name – ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " (${m.by})" else ""}\n")
+            val fertig = ids.filter { t.stateOf(it) == "fertig" }
+            val arbeit = ids.filter { t.stateOf(it) == "arbeit" }
+            val offen = ids.filter { t.stateOf(it) == "offen" }
+            if (fertig.isNotEmpty()) {
+                append("\nErledigt:\n")
+                fertig.forEach { fid ->
+                    val name = Store.fieldById(fid)?.name ?: "?"
+                    val m = t.done[fid]!!
+                    append("• $name – ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(m.at))}${if (m.by.isNotBlank()) " (${m.by})" else ""}\n")
+                }
             }
-            val openN = ids.filter { !t.isDone(it) }
-            if (openN.isNotEmpty()) {
+            if (arbeit.isNotEmpty()) {
+                append("\nIn Arbeit:\n")
+                arbeit.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
+            }
+            if (offen.isNotEmpty()) {
                 append("\nOffen:\n")
-                openN.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
+                offen.forEach { fid -> append("• ${Store.fieldById(fid)?.name ?: "?"}\n") }
             }
         }
         AlertDialog.Builder(this)
@@ -963,7 +1156,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun autoSync() {
-        Sync.sync { changed, _ -> if (changed) ui.post { drawStatic(); refresh() } }
+        Sync.sync { changed, _ ->
+            if (changed) ui.post { drawStatic(); refresh() }
+            // offene Foto-Uploads nachreichen (Meldungen)
+            if (PhotoUpload.hasPending()) {
+                Thread { runCatching { PhotoUpload.processQueue() }
+                    runOnUiThread { drawStatic() } }.start()
+            }
+        }
     }
 
     override fun onPause() {

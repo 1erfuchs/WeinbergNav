@@ -35,6 +35,7 @@ class TrackingService : Service() {
         const val ACTION_START = "start"
         const val ACTION_STOP = "stop"
         const val EXTRA_TASK = "task"
+        const val EXTRA_TASK_ID = "taskId"
 
         /** Zustand, den die Activity beobachtet */
         @Volatile var running = false
@@ -71,22 +72,25 @@ class TrackingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { stopTracking(); return START_NOT_STICKY }
-            else -> startTracking(intent?.getStringExtra(EXTRA_TASK) ?: "")
+            else -> startTracking(intent?.getStringExtra(EXTRA_TASK) ?: "", intent?.getStringExtra(EXTRA_TASK_ID))
         }
         return START_STICKY
     }
 
-    private fun startTracking(task: String) {
+    private fun startTracking(task: String, taskId: String? = null) {
         if (running) return
         val s = Session(
             id = Store.newId("s"),
             startedAt = System.currentTimeMillis(),
             task = task,
+            taskId = taskId,
             widthM = Store.widthM,
             user = Store.user
         )
         session = s
         running = true
+        markedInProgress.clear(); markedDone.clear()
+        fieldEnterAt = 0L; lastCoverage = 0.0
 
         startForeground(NOTIF_ID, buildNotification("Aufzeichnung laeuft", task.ifBlank { "Suche Standort …" }))
 
@@ -203,10 +207,67 @@ class TrackingService : Service() {
         if (f?.id != currentField?.id) {
             currentField = f
             if (f != null && s.fieldId == null) { s.fieldId = f.id; s.fieldName = f.name }
+            // Feldwechsel: Verweil-Timer zurücksetzen
+            fieldEnterAt = if (f != null) System.currentTimeMillis() else 0L
+            fieldEnterFrom = s.track.size - 1
             updateNotification()
         }
+
+        // Automatik: Aufgabe an Fahrt gekoppelt -> Felder markieren
+        autoMarkTask(s, f)
+
         notifyUi()
     }
+
+    // Verweildauer-Erkennung, damit ein kurzer Grenzkontakt nicht zählt
+    private var fieldEnterAt = 0L
+    private var fieldEnterFrom = 0
+    private val markedInProgress = mutableSetOf<String>()
+    private val markedDone = mutableSetOf<String>()
+    /** Mindest-Verweildauer im Feld, bevor es als "betreten" gilt */
+    private val enterDelayMs = 8000L
+    /** Abdeckungsschwelle für automatisch "erledigt" */
+    private val doneThreshold = 0.90
+
+    private fun autoMarkTask(s: Session, f: Field?) {
+        val taskId = s.taskId ?: return
+        val task = Store.taskById(taskId) ?: return
+        if (f == null) return
+
+        // 1) "in Arbeit": erst nach Mindest-Verweildauer im selben Feld
+        if (!markedInProgress.contains(f.id) && !markedDone.contains(f.id)) {
+            if (fieldEnterAt > 0 && System.currentTimeMillis() - fieldEnterAt >= enterDelayMs) {
+                if (task.stateOf(f.id) == "offen") {
+                    task.done[f.id] = FieldMark("arbeit", System.currentTimeMillis(), Store.user)
+                    task.updatedAt = System.currentTimeMillis()
+                    Store.saveTasks(); Store.syncTaskSoon()
+                }
+                markedInProgress.add(f.id)
+            }
+        }
+
+        // 2) "erledigt": wenn Abdeckung >= 90% der Feldfläche
+        if (!markedDone.contains(f.id) && task.stateOf(f.id) != "fertig") {
+            // nur gelegentlich rechnen (alle ~15 Punkte), Coverage ist teurer
+            if (s.track.size % 15 == 0) {
+                val cov = Geo.coverage(f.coords, s.track, s.widthM)
+                if (cov >= doneThreshold) {
+                    task.done[f.id] = FieldMark("fertig", System.currentTimeMillis(), Store.user)
+                    task.updatedAt = System.currentTimeMillis()
+                    Store.saveTasks(); Store.syncTaskSoon()
+                    markedDone.add(f.id)
+                    lastCoverage = 1.0
+                } else {
+                    lastCoverage = cov
+                    updateNotification()
+                }
+            }
+        }
+    }
+
+    /** aktueller Abdeckungs-Fortschritt des laufenden Feldes (für UI) */
+    var lastCoverage = 0.0
+        private set
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -239,9 +300,11 @@ class TrackingService : Service() {
         if (!running) return
         val s = session
         val ha = s?.ha ?: 0.0
+        val cov = if (s?.taskId != null && currentField != null && lastCoverage > 0)
+            String.format(Locale.GERMAN, " · %.0f%%", lastCoverage * 100) else ""
         val text = String.format(
-            Locale.GERMAN, "%s · %.2f ha · %s",
-            currentField?.name ?: "ausserhalb", ha, lastQuality
+            Locale.GERMAN, "%s · %.2f ha · %s%s",
+            currentField?.name ?: "ausserhalb", ha, lastQuality, cov
         )
         runCatching {
             (getSystemService(NotificationManager::class.java))
