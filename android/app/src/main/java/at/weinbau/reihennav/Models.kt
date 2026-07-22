@@ -240,7 +240,7 @@ data class Task(
         put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
         put("fieldIds", JSONArray().also { a -> fieldIds.forEach { a.put(it) } })
         put("done", JSONObject().also { d ->
-            done.forEach { (fid, m) -> d.put(fid, JSONObject().put("state", m.state).put("at", m.at).put("by", m.by).put("since", m.since)) }
+            done.forEach { (fid, m) -> d.put(fid, JSONObject().put("state", m.state).put("at", m.at).put("by", m.by).put("since", m.since).put("cov", m.cov).put("drive", m.drive)) }
         })
     }
     companion object {
@@ -257,7 +257,7 @@ data class Task(
                     val mo = d.getJSONObject(k)
                     // altes Format (nur at/by) -> state = fertig; since fällt auf at zurück
                     val at = mo.optLong("at", 0)
-                    dm[k] = FieldMark(mo.optString("state", "fertig"), at, mo.optString("by", ""), mo.optLong("since", at))
+                    dm[k] = FieldMark(mo.optString("state", "fertig"), at, mo.optString("by", ""), mo.optLong("since", at), mo.optDouble("cov", 0.0), mo.optString("drive", ""))
                 }
             }
             return Task(
@@ -287,7 +287,21 @@ data class Task(
  *          Bleibt beim Wechsel auf "fertig" erhalten, damit Start- UND
  *          Endzeit sichtbar sind. Fällt bei altem Datenbestand auf "at" zurück.
  */
-data class FieldMark(val state: String, val at: Long, val by: String, val since: Long = at)
+ * data class FieldMark
+ *  state = "arbeit" | "fertig"
+ *  at    = Zeitpunkt der letzten Statusänderung (arbeit=Beginn, fertig=Ende)
+ *  since = Arbeitsbeginn (bleibt beim Erledigen erhalten)
+ *  cov   = zuletzt berechnete Abdeckung 0.0..1.0 (bei "fertig" = 1.0). 0 = unbekannt/manuell.
+ *  drive = Id der Fahrt (Session), die diesen Stand erzeugt hat ("" = keine / manuell)
+ */
+data class FieldMark(
+    val state: String,
+    val at: Long,
+    val by: String,
+    val since: Long = at,
+    val cov: Double = 0.0,
+    val drive: String = ""
+)
 
 /** Geometrie-Hilfen (ohne externe Bibliothek) */
 object Geo {

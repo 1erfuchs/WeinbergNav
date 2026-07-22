@@ -89,7 +89,7 @@ class TrackingService : Service() {
         )
         session = s
         running = true
-        markedInProgress.clear(); markedDone.clear()
+        markedInProgress.clear(); markedDone.clear(); lastCovSynced.clear()
         fieldEnterAt = 0L; lastCoverage = 0.0
 
         startForeground(NOTIF_ID, buildNotification("Aufzeichnung laeuft", task.ifBlank { "Suche Standort …" }))
@@ -226,8 +226,15 @@ class TrackingService : Service() {
     private val markedDone = mutableSetOf<String>()
     /** Mindest-Verweildauer im Feld, bevor es als "betreten" gilt */
     private val enterDelayMs = 8000L
-    /** Abdeckungsschwelle für automatisch "erledigt" */
-    private val doneThreshold = 0.90
+    /** Abdeckungsschwelle für automatisch "erledigt".
+     *  0.85 statt 0.90: Vorgewende (Wendezonen) und Feldränder werden beim
+     *  Reihe-für-Reihe-Fahren nie ganz erfasst und kosten erfahrungsgemäss
+     *  5–10 %. Wichtig ist ausserdem: die eingestellte Arbeitsbreite muss
+     *  mindestens dem echten Reihenabstand entsprechen (siehe Store.widthM),
+     *  sonst bleibt zwischen den Bahnen ein unerfasster Streifen. */
+    private val doneThreshold = 0.85
+    /** zuletzt synchronisierter cov-Wert je Feld (drosselt den Netz-Sync) */
+    private val lastCovSynced = HashMap<String, Double>()
 
     private fun autoMarkTask(s: Session, f: Field?) {
         val taskId = s.taskId ?: return
@@ -239,7 +246,7 @@ class TrackingService : Service() {
             if (fieldEnterAt > 0 && System.currentTimeMillis() - fieldEnterAt >= enterDelayMs) {
                 if (task.stateOf(f.id) == "offen") {
                     val now = System.currentTimeMillis()
-                    task.done[f.id] = FieldMark("arbeit", now, Store.user, since = now)
+                    task.done[f.id] = FieldMark("arbeit", now, Store.user, since = now, cov = 0.0, drive = s.id)
                     task.updatedAt = now
                     Store.saveTasks(); Store.syncTaskSoon()
                 }
@@ -247,25 +254,35 @@ class TrackingService : Service() {
             }
         }
 
-        // 2) "erledigt": wenn Abdeckung >= 90% der Feldfläche
+        // 2) Abdeckung berechnen (alle ~15 Punkte) -> Live-% und ggf. "erledigt"
         if (!markedDone.contains(f.id) && task.stateOf(f.id) != "fertig") {
-            // nur gelegentlich rechnen (alle ~15 Punkte), Coverage ist teurer
             if (s.track.size % 15 == 0) {
                 val cov = Geo.coverage(f.coords, s.track, s.widthM)
+                lastCoverage = cov
                 if (cov >= doneThreshold) {
                     val now = System.currentTimeMillis()
-                    // Arbeitsbeginn erhalten: wurde das Feld vorher als "in Arbeit" markiert,
-                    // dessen since übernehmen; sonst jetzt (direkt erledigt).
+                    // Arbeitsbeginn erhalten, wenn das Feld vorher schon "in Arbeit" war
                     val since = task.done[f.id]?.since?.takeIf { it > 0 } ?: now
-                    task.done[f.id] = FieldMark("fertig", now, Store.user, since)
+                    task.done[f.id] = FieldMark("fertig", now, Store.user, since, cov = 1.0, drive = s.id)
                     task.updatedAt = now
                     Store.saveTasks(); Store.syncTaskSoon()
-                    markedDone.add(f.id)
+                    markedDone.add(f.id); markedInProgress.add(f.id)
                     lastCoverage = 1.0
-                } else {
-                    lastCoverage = cov
-                    updateNotification()
+                } else if (task.stateOf(f.id) == "arbeit") {
+                    // Live-Fortschritt am Feld festhalten (App + Web zeigen %)
+                    val prev = task.done[f.id]
+                    if (prev != null && cov > prev.cov) {
+                        task.done[f.id] = prev.copy(cov = cov, drive = s.id)
+                        task.updatedAt = System.currentTimeMillis()
+                        Store.saveTasks()
+                        // Netz-Sync nur, wenn sich % spürbar (>=5 Punkte) geändert hat
+                        if (cov >= (lastCovSynced[f.id] ?: 0.0) + 0.05) {
+                            lastCovSynced[f.id] = cov
+                            Store.syncTaskSoon()
+                        }
+                    }
                 }
+                updateNotification()
             }
         }
     }

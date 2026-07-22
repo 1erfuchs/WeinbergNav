@@ -1027,7 +1027,8 @@ class MainActivity : AppCompatActivity() {
                 "arbeit" -> {
                     val m = t.done[f.id]!!
                     val seit = if (m.since > 0) m.since else m.at
-                    "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(seit))})"
+                    val pct = if (m.cov > 0) " · ${(m.cov * 100).toInt()}%" else ""
+                    "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(seit))}$pct)"
                 }
                 else -> "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
             }
@@ -1162,7 +1163,8 @@ class MainActivity : AppCompatActivity() {
                     val name = Store.fieldById(fid)?.name ?: "?"
                     val m = t.done[fid]!!
                     val seit = if (m.since > 0) m.since else m.at
-                    append("• $name – seit ${tf.format(Date(seit))}\n")
+                    val pct = if (m.cov > 0) "  ·  ${(m.cov * 100).toInt()}% abgefahren" else ""
+                    append("• $name – seit ${tf.format(Date(seit))}$pct\n")
                 }
             }
             // Offene Felder nur als Anzahl (sonst füllen z. B. 24 Felder den Schirm)
