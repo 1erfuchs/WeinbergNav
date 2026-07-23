@@ -346,82 +346,122 @@ object Geo {
     }
 
     /**
-     * Rasterabdeckung eines Feldes durch eine Fahrspur.
-     * Legt ein Raster (cellM × cellM) über das Feld-Polygon. Eine Zelle zählt als
-     * "abgefahren", wenn ihr Mittelpunkt im Feld liegt UND höchstens halbe
-     * Arbeitsbreite von der Spur entfernt ist.
+     * Abdeckung eines Feldes durch eine oder mehrere Fahrspuren (0.0..1.0).
      *
-     * @return Anteil abgefahrener Feld-Zellen 0.0..1.0
+     * Ueber das Feld wird ein Raster gelegt; eine Rasterzelle gilt als
+     * bearbeitet, wenn ihr Mittelpunkt im Feld liegt UND hoechstens die halbe
+     * Arbeitsbreite von der Fahrspur entfernt ist. Gemessen wird - wie bisher -
+     * der exakte Abstand zur Spur-Linie (nicht nur zu den Messpunkten).
+     *
+     * Damit das auch bei langen Fahrten schnell bleibt, werden die Spurstuecke
+     * vorab in ein Gitter einsortiert; je Rasterzelle werden nur die Stuecke
+     * aus der direkten Nachbarschaft geprueft.
      */
-    fun coverage(poly: List<Pt>, track: List<Pt>, widthM: Double, cellM: Double = 0.0): Double {
-        if (poly.size < 3 || track.isEmpty()) return 0.0
-        // Rasterweite an die Arbeitsbreite anpassen (2..5 m), sonst verfehlen
-        // schmale Bahnen die Rasterpunkte.
-        val cell = if (cellM > 0) cellM else widthM.coerceIn(2.0, 5.0)
-        // lokale meterbasierte Projektion um den Feldschwerpunkt
+    fun coverageMulti(
+        poly: List<Pt>, tracks: List<List<Pt>>, widthM: Double, cellM: Double = 0.0
+    ): Double {
+        if (poly.size < 3 || tracks.isEmpty() || widthM <= 0) return 0.0
+
         val lat0 = poly.sumOf { it.lat } / poly.size
         val kx = cos(lat0 * PI / 180.0) * 111320.0
         val ky = 110540.0
-        fun mx(p: Pt) = p.lng * kx
-        fun my(p: Pt) = p.lat * ky
 
-        // Bounding-Box des Feldes in Metern
         var minX = Double.MAX_VALUE; var maxX = -Double.MAX_VALUE
         var minY = Double.MAX_VALUE; var maxY = -Double.MAX_VALUE
-        for (p in poly) {
-            val x = mx(p); val y = my(p)
+        val polyX = DoubleArray(poly.size); val polyY = DoubleArray(poly.size)
+        for (i in poly.indices) {
+            val x = poly[i].lng * kx; val y = poly[i].lat * ky
+            polyX[i] = x; polyY[i] = y
             if (x < minX) minX = x; if (x > maxX) maxX = x
             if (y < minY) minY = y; if (y > maxY) maxY = y
         }
-        // Spur in Meter-Koordinaten
-        val tx = DoubleArray(track.size) { mx(track[it]) }
-        val ty = DoubleArray(track.size) { my(track[it]) }
+
         val half = widthM / 2.0
         val half2 = half * half
+        // Gitterweite = Arbeitsbreite; damit liegt jedes Spurstueck, das eine
+        // Zelle beruehren koennte, sicher in der 3x3-Nachbarschaft.
+        val bucket = max(widthM, 1.0)
+        val sampleStep = bucket / 4.0
+        val loX = minX - widthM; val hiX = maxX + widthM
+        val loY = minY - widthM; val hiY = maxY + widthM
 
-        // quadrierter Abstand Punkt->Segment
-        fun distSq(px: Double, py: Double, ax: Double, ay: Double, bx: Double, by: Double): Double {
-            val dx = bx - ax; val dy = by - ay
-            val len2 = dx * dx + dy * dy
-            if (len2 == 0.0) { val ex = px - ax; val ey = py - ay; return ex * ex + ey * ey }
-            var t = ((px - ax) * dx + (py - ay) * dy) / len2
-            if (t < 0) t = 0.0; if (t > 1) t = 1.0
-            val cx = ax + t * dx; val cy = ay + t * dy
-            val ex = px - cx; val ey = py - cy
-            return ex * ex + ey * ey
+        // Spurstuecke (Segmente) sammeln, nur in Feldnaehe
+        val sx1 = ArrayList<Double>(); val sy1 = ArrayList<Double>()
+        val sx2 = ArrayList<Double>(); val sy2 = ArrayList<Double>()
+        val grid = HashMap<Long, MutableList<Int>>()
+        fun key(gx: Int, gy: Int): Long = (gx.toLong() shl 32) xor (gy.toLong() and 0xffffffffL)
+
+        for (track in tracks) {
+            for (i in 0 until track.size - 1) {
+                val x1 = track[i].lng * kx;     val y1 = track[i].lat * ky
+                val x2 = track[i + 1].lng * kx; val y2 = track[i + 1].lat * ky
+                // Segmente komplett ausserhalb der Feldumgebung ueberspringen
+                if ((x1 < loX && x2 < loX) || (x1 > hiX && x2 > hiX) ||
+                    (y1 < loY && y2 < loY) || (y1 > hiY && y2 > hiY)) continue
+                val dx = x2 - x1; val dy = y2 - y1
+                val len = sqrt(dx * dx + dy * dy)
+                if (len > 500.0) continue                 // GPS-Ausreisser
+                val idx = sx1.size
+                sx1.add(x1); sy1.add(y1); sx2.add(x2); sy2.add(y2)
+                // Segment entlang abtasten und in die Gitterfelder eintragen
+                val n = max(1, ceil(len / sampleStep).toInt())
+                var lastKey = Long.MIN_VALUE
+                for (s in 0..n) {
+                    val t = s.toDouble() / n
+                    val px = x1 + dx * t; val py = y1 + dy * t
+                    val k = key(floor(px / bucket).toInt(), floor(py / bucket).toInt())
+                    if (k != lastKey) {
+                        grid.getOrPut(k) { ArrayList() }.add(idx)
+                        lastKey = k
+                    }
+                }
+            }
         }
+        if (sx1.isEmpty()) return 0.0
 
-        // Feld-Polygon in Meter-Koordinaten für Punkt-in-Polygon
-        val polyX = DoubleArray(poly.size) { mx(poly[it]) }
-        val polyY = DoubleArray(poly.size) { my(poly[it]) }
-        fun insideM(px: Double, py: Double): Boolean {
+        fun inside(x: Double, y: Double): Boolean {
             var c = false; var j = poly.size - 1
             for (i in poly.indices) {
-                if ((polyY[i] > py) != (polyY[j] > py)) {
-                    val x = (polyX[j] - polyX[i]) * (py - polyY[i]) / (polyY[j] - polyY[i]) + polyX[i]
-                    if (px < x) c = !c
+                if ((polyY[i] > y) != (polyY[j] > y)) {
+                    val xx = (polyX[j] - polyX[i]) * (y - polyY[i]) / (polyY[j] - polyY[i]) + polyX[i]
+                    if (x < xx) c = !c
                 }
                 j = i
             }
             return c
         }
 
+        // quadrierter Abstand Punkt -> Segment
+        fun distSq(px: Double, py: Double, i: Int): Double {
+            val x1 = sx1[i]; val y1 = sy1[i]
+            val dx = sx2[i] - x1; val dy = sy2[i] - y1
+            val len2 = dx * dx + dy * dy
+            if (len2 == 0.0) { val ex = px - x1; val ey = py - y1; return ex * ex + ey * ey }
+            var t = ((px - x1) * dx + (py - y1) * dy) / len2
+            if (t < 0) t = 0.0; if (t > 1) t = 1.0
+            val ex = px - (x1 + t * dx); val ey = py - (y1 + t * dy)
+            return ex * ex + ey * ey
+        }
+
+        val cell = if (cellM > 0) cellM else widthM.coerceIn(2.0, 5.0)
         var total = 0; var covered = 0
         var cy = minY + cell / 2
         while (cy <= maxY) {
             var cx = minX + cell / 2
             while (cx <= maxX) {
-                if (insideM(cx, cy)) {
+                if (inside(cx, cy)) {
                     total++
-                    // liegt die Zelle nah genug an der Spur?
+                    val gx = floor(cx / bucket).toInt(); val gy = floor(cy / bucket).toInt()
                     var near = false
-                    var k = 0
-                    while (k < track.size) {
-                        val d = if (k + 1 < track.size)
-                            distSq(cx, cy, tx[k], ty[k], tx[k + 1], ty[k + 1])
-                        else { val ex = cx - tx[k]; val ey = cy - ty[k]; ex * ex + ey * ey }
-                        if (d <= half2) { near = true; break }
-                        k++
+                    var ox = -1
+                    while (ox <= 1 && !near) {
+                        var oy = -1
+                        while (oy <= 1 && !near) {
+                            val l = grid[key(gx + ox, gy + oy)]
+                            if (l != null) for (i in l) { if (distSq(cx, cy, i) <= half2) { near = true; break } }
+                            oy++
+                        }
+                        ox++
                     }
                     if (near) covered++
                 }
@@ -431,4 +471,7 @@ object Geo {
         }
         return if (total == 0) 0.0 else covered.toDouble() / total.toDouble()
     }
+
+    fun coverage(poly: List<Pt>, track: List<Pt>, widthM: Double, cellM: Double = 0.0): Double =
+        coverageMulti(poly, listOf(track), widthM, cellM)
 }

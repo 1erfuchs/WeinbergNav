@@ -38,6 +38,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.cos
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
@@ -887,12 +888,13 @@ class MainActivity : AppCompatActivity() {
         b.map.overlays.add(events)
 
         for (f in Store.activeFields()) {
-            val open = Store.openTasksFor(f.id).size
             val poly = Polygon(b.map).apply {
                 points = f.coords.map { GeoPoint(it.lat, it.lng) }
-                // Felder mit offenen Aufgaben werden hervorgehoben
-                fillPaint.color = if (open > 0) 0x3339D3E0 else 0x1AE0B34A
-                outlinePaint.color = if (open > 0) 0xFF39D3E0.toInt() else 0xFFE0B34A.toInt()
+                // Alle Felder einheitlich: die Farbe soll KEINEN Aufgabenstatus
+                // andeuten - es koennen mehrere Aufgaben gleichzeitig laufen,
+                // eine einzelne Farbe waere dann irrefuehrend.
+                fillPaint.color = 0x1AE0B34A
+                outlinePaint.color = 0xFFE0B34A.toInt()
                 outlinePaint.strokeWidth = 3f
                 title = f.name
                 setOnClickListener { _, _, _ -> fieldTasksDialog(f); true }
@@ -903,11 +905,10 @@ class MainActivity : AppCompatActivity() {
                 f.coords.sumOf { it.lat } / f.coords.size,
                 f.coords.sumOf { it.lng } / f.coords.size
             )
-            val badge = if (open > 0) "  ⚑$open" else ""
             val lbl = Marker(b.map).apply {
                 position = center
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                icon = labelIcon("${f.name} · ${fmt(f.ha)} ha$badge", open > 0)
+                icon = labelIcon("${f.name} · ${fmt(f.ha)} ha", false)
                 setInfoWindow(null)
                 setOnMarkerClickListener { _, _ -> fieldTasksDialog(f); true }
             }
@@ -1027,7 +1028,8 @@ class MainActivity : AppCompatActivity() {
                 "arbeit" -> {
                     val m = t.done[f.id]!!
                     val seit = if (m.since > 0) m.since else m.at
-                    val pct = if (m.cov > 0) " · ${(m.cov * 100).toInt()}%" else ""
+                    val cov = coverageOf(t, f.id)
+                    val pct = if (cov > 0) " · ${(cov * 100).roundToInt()}%" else ""
                     "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(seit))}$pct)"
                 }
                 else -> "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
@@ -1159,11 +1161,15 @@ class MainActivity : AppCompatActivity() {
             }
             if (arbeit.isNotEmpty()) {
                 append("\nIn Arbeit:\n")
-                arbeit.forEach { fid ->
+                // neueste zuerst, damit die aktuelle Fläche oben steht
+                arbeit.sortedByDescending { fid ->
+                    t.done[fid]?.let { if (it.since > 0) it.since else it.at } ?: 0L
+                }.forEach { fid ->
                     val name = Store.fieldById(fid)?.name ?: "?"
                     val m = t.done[fid]!!
                     val seit = if (m.since > 0) m.since else m.at
-                    val pct = if (m.cov > 0) "  ·  ${(m.cov * 100).toInt()}% abgefahren" else ""
+                    val cov = coverageOf(t, fid)
+                    val pct = if (cov > 0) "  ·  ${(cov * 100).roundToInt()}% abgefahren" else ""
                     append("• $name – seit ${tf.format(Date(seit))}$pct\n")
                 }
             }
@@ -1180,6 +1186,11 @@ class MainActivity : AppCompatActivity() {
             }
         }.apply { addView(tv) }
 
+        // Karte auf die zuletzt begonnene Fläche dieser Aufgabe schwenken.
+        // Reihenfolge: zuletzt "in Arbeit" genommen, sonst zuletzt erledigt,
+        // sonst das erste Feld der Aufgabe.
+        zoomToTaskFocus(t, ids)
+
         AlertDialog.Builder(this)
             .setTitle(t.title)
             .setView(scroll)
@@ -1193,6 +1204,21 @@ class MainActivity : AppCompatActivity() {
                         Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic(); toast("Aufgabe gelöscht")
                     }.setNegativeButton("Abbrechen", null).show()
             }.show()
+    }
+
+    /**
+     * Schwenkt die Karte auf die Fläche einer Aufgabe, die gerade am ehesten
+     * interessiert: das zuletzt auf "in Arbeit" gesetzte Feld (neuestes Datum
+     * zuerst), sonst das zuletzt erledigte, sonst das erste Feld der Aufgabe.
+     */
+    private fun zoomToTaskFocus(t: Task, ids: List<String>) {
+        fun zeit(fid: String): Long =
+            t.done[fid]?.let { if (it.since > 0) it.since else it.at } ?: 0L
+        val ziel =
+            ids.filter { t.stateOf(it) == "arbeit" }.maxByOrNull { zeit(it) }
+                ?: ids.filter { t.stateOf(it) == "fertig" }.maxByOrNull { zeit(it) }
+                ?: ids.firstOrNull()
+        Store.fieldById(ziel)?.let { zoomTo(it) }
     }
 
     /**
@@ -1213,6 +1239,29 @@ class MainActivity : AppCompatActivity() {
         // Karte auf das erste Feld der Aufgabe schwenken
         val allIds = Store.activeFields().map { it.id }
         t.appliesTo(allIds).firstNotNullOfOrNull { Store.fieldById(it) }?.let { zoomTo(it) }
+    }
+
+    /**
+     * Abdeckung eines Feldes in einer Aufgabe (0.0..1.0).
+     * Bevorzugt den waehrend der Fahrt gespeicherten Wert; fehlt er (z. B. weil
+     * das Feld mit einer aelteren App-Version markiert wurde), wird er aus den
+     * Spuren der an die Aufgabe gekoppelten Fahrten berechnet.
+     */
+    private fun coverageOf(t: Task, fieldId: String): Double {
+        val mark = t.done[fieldId]
+        if (mark != null && mark.cov > 0) return mark.cov
+        val f = Store.fieldById(fieldId) ?: return 0.0
+        if (f.coords.size < 3) return 0.0
+        val tracks = ArrayList<List<Pt>>()
+        var breite = 0.0
+        for (s in Store.sessions) {
+            if (s.deleted || s.taskId != t.id || s.track.size < 2) continue
+            tracks.add(s.track)
+            if (s.widthM > breite) breite = s.widthM
+        }
+        if (tracks.isEmpty()) return 0.0
+        if (breite <= 0.0) breite = Store.widthM
+        return runCatching { Geo.coverageMulti(f.coords, tracks, breite) }.getOrDefault(0.0)
     }
 
     /** Spurbreite massstabsgetreu: Meter -> Pixel beim aktuellen Zoom */
