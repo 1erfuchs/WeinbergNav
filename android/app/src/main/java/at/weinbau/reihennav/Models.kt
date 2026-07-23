@@ -281,18 +281,13 @@ data class Task(
 /**
  * Erledigungs-Vermerk eines Feldes in einer Aufgabe.
  *  state = "arbeit" | "fertig"
- *  at    = Zeitpunkt der letzten Statusänderung
- *          (bei "arbeit" = Beginn, bei "fertig" = Ende der Arbeit)
+ *  at    = Zeitpunkt der letzten Statusänderung (arbeit=Beginn, fertig=Ende)
  *  since = Zeitpunkt, an dem das Feld erstmals auf "in Arbeit" ging.
  *          Bleibt beim Wechsel auf "fertig" erhalten, damit Start- UND
- *          Endzeit sichtbar sind. Fällt bei altem Datenbestand auf "at" zurück.
- */
- * data class FieldMark
- *  state = "arbeit" | "fertig"
- *  at    = Zeitpunkt der letzten Statusänderung (arbeit=Beginn, fertig=Ende)
- *  since = Arbeitsbeginn (bleibt beim Erledigen erhalten)
- *  cov   = zuletzt berechnete Abdeckung 0.0..1.0 (bei "fertig" = 1.0). 0 = unbekannt/manuell.
- *  drive = Id der Fahrt (Session), die diesen Stand erzeugt hat ("" = keine / manuell)
+ *          Endzeit sichtbar sind. Faellt bei altem Datenbestand auf "at" zurueck.
+ *  cov   = zuletzt berechnete Abdeckung 0.0..1.0 (bei "fertig" = 1.0).
+ *          0 = unbekannt/manuell gesetzt.
+ *  drive = Id der Fahrt (Session), die diesen Stand erzeugt hat ("" = manuell)
  */
 data class FieldMark(
     val state: String,
