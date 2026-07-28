@@ -19,6 +19,9 @@ import android.preference.PreferenceManager
 import android.text.InputType
 import android.view.View
 import android.widget.*
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import org.json.JSONObject
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -701,6 +704,7 @@ class MainActivity : AppCompatActivity() {
     private fun settingsDialog() {
         val konto = if (Sync.configured) "Server: angemeldet als ${Store.user}" else "Server & Konto: nicht verbunden"
         val items = arrayOf(
+            "\uD83C\uDF24 Spritzfenster (wann & was)",
             "Aufgaben verwalten",
             "Arbeitsbreite: ${fmt(Store.widthM)} m",
             "Benutzer: ${Store.user}",
@@ -714,18 +718,238 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Einstellungen")
             .setItems(items) { _, i ->
-                when (i) {
-                    0 -> tasksMenu()
-                    1 -> widthDialog()
-                    2 -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
-                    3 -> serverDialog()
-                    4 -> syncNow()
-                    5 -> btDialog()
-                    6 -> ntripDialog()
-                    7 -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
-                    8 -> openFile.launch(arrayOf("application/json", "*/*"))
+                when (items[i]) {
+                    "\uD83C\uDF24 Spritzfenster (wann & was)" -> spritzfensterDialog()
+                    "Aufgaben verwalten" -> tasksMenu()
+                    "Benutzer: ${Store.user}" -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
+                    konto -> serverDialog()
+                    "Jetzt synchronisieren" -> syncNow()
+                    "RTK-Korrekturdienst (NTRIP)" -> ntripDialog()
+                    "Daten exportieren" -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
+                    "Daten importieren" -> openFile.launch(arrayOf("application/json", "*/*"))
+                    else -> when {
+                        items[i].startsWith("Arbeitsbreite") -> widthDialog()
+                        items[i].startsWith("GPS-Empfaenger") -> btDialog()
+                    }
                 }
             }.setPositiveButton("Schliessen", null).show()
+    }
+
+    // ---------- Spritzfenster (Entscheidungshilfe aus dem Server) ----------
+    /** Zeigt die Entscheidungshilfe. Lädt im Hintergrund vom Server
+     *  (api/spritzfenster_app.php) und zeigt bei fehlendem Netz den letzten Stand. */
+    private fun spritzfensterDialog() {
+        if (!Sync.configured) { toast("Kein Server verbunden – bitte zuerst anmelden (Mehr → Server)."); return }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(16), dpx(12), dpx(16), dpx(12))
+        }
+        val prefs = getSharedPreferences("spritzfenster", MODE_PRIVATE)
+        val cached = prefs.getString("json", null)
+        if (cached != null) buildSpritzfenster(container, cached, prefs.getLong("at", 0), true)
+        else container.addView(sfText("Spritzfenster wird geladen …", 14f, 0xFF9AA0A6.toInt()))
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("\uD83C\uDF24 Spritzfenster")
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("Schließen", null)
+            .setNeutralButton("Aktualisieren", null)
+            .show()
+        dlg.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener { ladeSpritzfenster(container, dlg) }
+        ladeSpritzfenster(container, dlg)
+    }
+
+    private fun ladeSpritzfenster(container: LinearLayout, dlg: AlertDialog) {
+        Thread {
+            val json = fetchSpritzfenster()
+            runOnUiThread {
+                if (!dlg.isShowing) return@runOnUiThread
+                if (json != null) {
+                    getSharedPreferences("spritzfenster", MODE_PRIVATE).edit()
+                        .putString("json", json).putLong("at", System.currentTimeMillis()).apply()
+                    buildSpritzfenster(container, json, System.currentTimeMillis(), false)
+                } else {
+                    val prefs = getSharedPreferences("spritzfenster", MODE_PRIVATE)
+                    val c = prefs.getString("json", null)
+                    if (c != null) buildSpritzfenster(container, c, prefs.getLong("at", 0), true)
+                    else {
+                        container.removeAllViews()
+                        container.addView(sfText("Konnte nicht laden. Internet-/Serververbindung prüfen.", 14f, 0xFFE0625A.toInt()))
+                    }
+                }
+            }
+        }.start()
+    }
+
+    /** GET auf api/spritzfenster_app.php mit Bearer-Token. Null bei Fehler. */
+    private fun fetchSpritzfenster(): String? {
+        var c: HttpURLConnection? = null
+        return try {
+            c = (URL(Store.serverUrl.trimEnd('/') + "/spritzfenster_app.php").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 15000; readTimeout = 30000
+                setRequestProperty("Authorization", "Bearer ${Store.serverToken}")
+            }
+            val code = c.responseCode
+            if (code !in 200..299) return null
+            c.inputStream.bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            null
+        } finally {
+            c?.disconnect()
+        }
+    }
+
+    // ----- Kachel-Bausteine -----
+    private fun dpx(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** Ampelfarbe zu einer Stufe (Eignung oder Rhythmus). */
+    private fun ampelColor(stufe: String): Int = when (stufe.trim().lowercase()) {
+        "sehr gut", "gut", "ok" -> 0xFF5AC47A.toInt()
+        "mäßig", "warn", "fällig" -> 0xFFE0B34A.toInt()
+        "ungeeignet", "bad" -> 0xFFE0625A.toInt()
+        else -> 0xFF7C8188.toInt()   // neutral / start / unbekannt
+    }
+
+    private fun sfText(s: String, size: Float = 14f, color: Int = 0xFFE6E6E6.toInt(), bold: Boolean = false): TextView =
+        TextView(this).apply {
+            text = s; textSize = size; setTextColor(color)
+            if (bold) setTypeface(typeface, Typeface.BOLD)
+        }
+
+    private fun sfHeader(s: String): TextView =
+        TextView(this).apply {
+            text = s; textSize = 12f; setTextColor(0xFF9AA0A6.toInt())
+            setTypeface(typeface, Typeface.BOLD); letterSpacing = 0.08f
+            setPadding(dpx(2), dpx(12), 0, dpx(4))
+        }
+
+    /** Eine getönte Kachel mit farbigem Rand/Akzent. */
+    private fun sfCard(accent: Int): LinearLayout {
+        val a = accent and 0x00FFFFFF
+        val bg = GradientDrawable().apply {
+            cornerRadius = dpx(10).toFloat()
+            setColor(a or 0x22000000)          // ~13 % getönt
+            setStroke(dpx(1), a or 0x66000000)  // kräftigerer Rand
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = bg
+            setPadding(dpx(12), dpx(10), dpx(12), dpx(10))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dpx(4), 0, dpx(4)) }
+        }
+    }
+
+    /** Baut die Kachel-Ansicht in den Container (ersetzt vorhandenen Inhalt). */
+    private fun buildSpritzfenster(container: LinearLayout, json: String, atMillis: Long, stale: Boolean) {
+        container.removeAllViews()
+        try {
+            val o = JSONObject(json)
+            val hm = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
+            val hhmm = SimpleDateFormat("HH:mm", Locale.GERMAN)
+            val wd = SimpleDateFormat("EEE dd.MM.", Locale.GERMAN)
+            fun tag(iso: String): String = try {
+                wd.format(SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).parse(iso)!!)
+            } catch (e: Exception) { iso }
+
+            container.addView(sfText(
+                (if (stale) "Stand ${hm.format(Date(atMillis))} · offline" else "Stand ${hm.format(Date(atMillis))}"),
+                12f, 0xFF9AA0A6.toInt()))
+
+            // --- WAS SPRITZEN ---
+            container.addView(sfHeader("WAS SPRITZEN"))
+            val e = o.optJSONObject("empfehlung")
+            val wasCard = sfCard(0xFFE0B34A.toInt())
+            if (e != null) {
+                wasCard.addView(sfText(e.optString("kurz"), 15f, 0xFFF0F0F0.toInt(), true))
+                val hw = e.optString("hinweis"); if (hw.isNotBlank() && hw != "null")
+                    wasCard.addView(sfText("↳ $hw", 13f, 0xFFCDD2D6.toInt()).also { it.setPadding(0, dpx(4), 0, 0) })
+                val q = e.optString("quelle")
+                wasCard.addView(sfText("Stand ${tag(e.optString("datum"))}" + (if (q.isNotBlank() && q != "null") " · $q" else ""),
+                    12f, 0xFF9AA0A6.toInt()).also { it.setPadding(0, dpx(4), 0, 0) })
+            } else {
+                wasCard.addView(sfText("Noch keine Empfehlung hinterlegt.", 14f, 0xFFCDD2D6.toInt()))
+            }
+            container.addView(wasCard)
+
+            // --- HINWEISE ---
+            val hin = o.optJSONArray("hinweise")
+            if (hin != null && hin.length() > 0) {
+                for (i in 0 until hin.length()) {
+                    val h = hin.getJSONObject(i)
+                    val col = ampelColor(h.optString("typ"))
+                    val card = sfCard(col)
+                    card.addView(sfText("⚠ ${h.optString("text")}", 13f, 0xFFF0F0F0.toInt()))
+                    container.addView(card)
+                }
+            }
+
+            // --- WER / WANN ---
+            container.addView(sfHeader("WER / WANN"))
+            val pers = o.optJSONArray("personen")
+            if (pers != null) for (i in 0 until pers.length()) {
+                val p = pers.getJSONObject(i)
+                val rh = p.optJSONObject("rhythmus")
+                val rStufe = rh?.optString("stufe") ?: "start"
+                val card = sfCard(ampelColor(rStufe))
+                card.addView(sfText("${p.optString("name")} — Bez. ${p.optString("bezirk")} · ${p.optInt("stunden")} h am Stück",
+                    15f, 0xFFF0F0F0.toInt(), true))
+                if (rh != null) card.addView(sfText("Rhythmus: ${rh.optString("text")}", 13f, ampelColor(rStufe))
+                    .also { it.setPadding(0, dpx(3), 0, 0) })
+                val f = p.optJSONObject("fenster")
+                val win: TextView = when {
+                    f == null -> sfText("Fenster: keine Prognose", 13f, 0xFF9AA0A6.toInt())
+                    f.optBoolean("gefunden") -> {
+                        val von = f.optLong("von") * 1000; val bis = f.optLong("bis") * 1000
+                        val frueh = if (f.optBoolean("frueh")) "  · früher Start nötig" else ""
+                        sfText("Fenster: ${wd.format(Date(von))} ${hhmm.format(Date(von))}–${hhmm.format(Date(bis))}" +
+                               "  (${f.optString("stufe")})$frueh", 14f, ampelColor(f.optString("stufe")), true)
+                    }
+                    else -> sfText("Kein ${p.optInt("stunden")}-h-Fenster – längster Block ${f.optInt("laengste")} h",
+                        13f, 0xFFE0B34A.toInt())
+                }
+                win.setPadding(0, dpx(4), 0, 0)
+                card.addView(win)
+                container.addView(card)
+            }
+
+            // --- WETTER NÄCHSTE TAGE (Ampelkacheln) ---
+            container.addView(sfHeader("WETTER NÄCHSTE TAGE"))
+            val tage = o.optJSONArray("tage")
+            if (tage != null) for (i in 0 until tage.length()) {
+                val t = tage.getJSONObject(i)
+                val stufe = t.optString("stufe")
+                val col = ampelColor(stufe)
+                val card = sfCard(col)
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                // farbiger Punkt als Ampel
+                val dot = View(this).apply {
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(col) }
+                    layoutParams = LinearLayout.LayoutParams(dpx(12), dpx(12)).apply { setMargins(0, dpx(5), dpx(10), 0) }
+                }
+                row.addView(dot)
+                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                box.addView(sfText("${tag(t.optString("tag"))}  ·  $stufe", 14f, 0xFFF0F0F0.toInt(), true))
+                val slot = if (!t.isNull("slotVon"))
+                    "bestes Fenster ${"%02d".format(t.optInt("slotVon"))}–${"%02d".format(t.optInt("slotBis"))} Uhr"
+                else {
+                    val g = t.optString("grund")
+                    "kein gutes Fenster tagsüber" + if (g.isNotBlank() && g != "null") " ($g)" else ""
+                }
+                box.addView(sfText(slot, 13f, 0xFFCDD2D6.toInt()))
+                row.addView(box)
+                card.addView(row)
+                container.addView(card)
+            }
+            if (!o.optBoolean("wetterOk", true))
+                container.addView(sfText("Wetterdaten konnten nicht geladen werden.", 13f, 0xFFE0625A.toInt())
+                    .also { it.setPadding(0, dpx(6), 0, 0) })
+
+            container.addView(sfText("Planungshilfe – maßgeblich sind Zulassung, Etikett und Wartezeiten.",
+                12f, 0xFF9AA0A6.toInt()).also { it.setPadding(0, dpx(12), 0, 0) })
+        } catch (ex: Exception) {
+            container.addView(sfText("Anzeige konnte nicht erstellt werden.", 14f, 0xFFE0625A.toInt()))
+        }
     }
 
     private fun serverDialog() {
