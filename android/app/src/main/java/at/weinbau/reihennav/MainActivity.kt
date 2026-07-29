@@ -19,6 +19,10 @@ import android.preference.PreferenceManager
 import android.text.InputType
 import android.view.View
 import android.widget.*
+import android.graphics.Canvas
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import org.json.JSONObject
@@ -896,8 +900,16 @@ class MainActivity : AppCompatActivity() {
                     15f, 0xFFF0F0F0.toInt(), true))
                 if (rh != null) card.addView(sfText("Rhythmus: ${rh.optString("text")}", 13f, ampelColor(rStufe))
                     .also { it.setPadding(0, dpx(3), 0, 0) })
+                val faellig = p.optBoolean("faellig", true)
+                val schwelle = o.optInt("schwelle", 8)
                 val f = p.optJSONObject("fenster")
                 val win: TextView = when {
+                    !faellig -> {
+                        val tage = rh?.optInt("tage", 0) ?: 0
+                        val rest = (schwelle - tage).coerceAtLeast(0)
+                        sfText("Wetterfenster ab Tag $schwelle – noch $rest Tag${if (rest == 1) "" else "e"}",
+                            13f, 0xFF9AA0A6.toInt())
+                    }
                     f == null -> sfText("Fenster: keine Prognose", 13f, 0xFF9AA0A6.toInt())
                     f.optBoolean("gefunden") -> {
                         val von = f.optLong("von") * 1000; val bis = f.optLong("bis") * 1000
@@ -913,33 +925,58 @@ class MainActivity : AppCompatActivity() {
                 container.addView(card)
             }
 
-            // --- WETTER NÄCHSTE TAGE (Ampelkacheln) ---
+            // --- WETTER NÄCHSTE TAGE (Ampelkacheln, tippbar) ---
             container.addView(sfHeader("WETTER NÄCHSTE TAGE"))
-            val tage = o.optJSONArray("tage")
-            if (tage != null) for (i in 0 until tage.length()) {
-                val t = tage.getJSONObject(i)
-                val stufe = t.optString("stufe")
-                val col = ampelColor(stufe)
-                val card = sfCard(col)
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                // farbiger Punkt als Ampel
-                val dot = View(this).apply {
-                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(col) }
-                    layoutParams = LinearLayout.LayoutParams(dpx(12), dpx(12)).apply { setMargins(0, dpx(5), dpx(10), 0) }
-                }
-                row.addView(dot)
-                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                box.addView(sfText("${tag(t.optString("tag"))}  ·  $stufe", 14f, 0xFFF0F0F0.toInt(), true))
-                val slot = if (!t.isNull("slotVon"))
-                    "bestes Fenster ${"%02d".format(t.optInt("slotVon"))}–${"%02d".format(t.optInt("slotBis"))} Uhr"
-                else {
-                    val g = t.optString("grund")
-                    "kein gutes Fenster tagsüber" + if (g.isNotBlank() && g != "null") " ($g)" else ""
-                }
-                box.addView(sfText(slot, 13f, 0xFFCDD2D6.toInt()))
-                row.addView(box)
-                card.addView(row)
+            val anyDue = o.optBoolean("anyDue", true)
+            if (!anyDue) {
+                val rest = if (o.isNull("minRest")) 0 else o.optInt("minRest", 0)
+                val card = sfCard(0xFF7C8188.toInt())
+                card.addView(sfText("Nächste Spritzung erst in ca. $rest Tag${if (rest == 1) "" else "en"} " +
+                    "(Rhythmus 10–14 Tage).", 14f, 0xFFF0F0F0.toInt()))
+                card.addView(sfText("Das Wetterfenster wird ab Tag ${o.optInt("schwelle", 8)} angezeigt.",
+                    13f, 0xFF9AA0A6.toInt()).also { it.setPadding(0, dpx(3), 0, 0) })
                 container.addView(card)
+            } else {
+                // Stundendaten nach Tag gruppieren (für die Kurven-Detailansicht)
+                val stundenProTag = HashMap<String, MutableList<JSONObject>>()
+                val sArr = o.optJSONArray("stunden")
+                if (sArr != null) for (i in 0 until sArr.length()) {
+                    val s = sArr.getJSONObject(i)
+                    stundenProTag.getOrPut(s.optString("day")) { ArrayList() }.add(s)
+                }
+                val tage = o.optJSONArray("tage")
+                if (tage != null) for (i in 0 until tage.length()) {
+                    val t = tage.getJSONObject(i)
+                    val stufe = t.optString("stufe")
+                    val col = ampelColor(stufe)
+                    val card = sfCard(col)
+                    val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                    val dot = View(this).apply {
+                        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(col) }
+                        layoutParams = LinearLayout.LayoutParams(dpx(12), dpx(12)).apply { setMargins(0, dpx(5), dpx(10), 0) }
+                    }
+                    row.addView(dot)
+                    val box = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+                    box.addView(sfText("${tag(t.optString("tag"))}  ·  $stufe", 14f, 0xFFF0F0F0.toInt(), true))
+                    val slot = if (!t.isNull("slotVon"))
+                        "bestes Fenster ${"%02d".format(t.optInt("slotVon"))}–${"%02d".format(t.optInt("slotBis"))} Uhr"
+                    else {
+                        val g = t.optString("grund")
+                        "kein gutes Fenster tagsüber" + if (g.isNotBlank() && g != "null") " ($g)" else ""
+                    }
+                    box.addView(sfText(slot, 13f, 0xFFCDD2D6.toInt()))
+                    row.addView(box)
+                    row.addView(sfText("›", 20f, 0xFF9AA0A6.toInt()))
+                    card.addView(row)
+                    val dayIso = t.optString("tag")
+                    val dayHours = stundenProTag[dayIso]
+                    if (dayHours != null && dayHours.isNotEmpty())
+                        card.setOnClickListener { tagKurvenDialog(tag(dayIso), dayHours) }
+                    container.addView(card)
+                }
             }
             if (!o.optBoolean("wetterOk", true))
                 container.addView(sfText("Wetterdaten konnten nicht geladen werden.", 13f, 0xFFE0625A.toInt())
@@ -949,6 +986,127 @@ class MainActivity : AppCompatActivity() {
                 12f, 0xFF9AA0A6.toInt()).also { it.setPadding(0, dpx(12), 0, 0) })
         } catch (ex: Exception) {
             container.addView(sfText("Anzeige konnte nicht erstellt werden.", 14f, 0xFFE0625A.toInt()))
+        }
+    }
+
+    /** Detaildialog eines Tages mit nativ gezeichneten Wetterkurven. */
+    private fun tagKurvenDialog(titel: String, hours: List<JSONObject>) {
+        val chart = WeatherChartView(this, hours).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dpx(360))
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(8), dpx(8), dpx(8), dpx(8))
+            addView(chart)
+            addView(sfText("Grün = gute Spritzbedingung, rot = ungeeignet. Wind gestrichelt = Böen.",
+                12f, 0xFF9AA0A6.toInt()).also { it.setPadding(dpx(6), dpx(8), dpx(6), 0) })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Wetter am $titel")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Schließen", null)
+            .show()
+    }
+
+    private fun fmtNum(v: Double): String =
+        if (Math.abs(v - Math.round(v)) < 0.05) Math.round(v).toString()
+        else String.format(Locale.GERMAN, "%.1f", v)
+
+    /** Zeichnet Temperatur-, Wind- und Regenkurve eines Tages (0–24 Uhr). */
+    private inner class WeatherChartView(ctx: Context, hoursIn: List<JSONObject>) : View(ctx) {
+        private val hours = hoursIn   // vom Server bereits in Stundenreihenfolge (0–23)
+        private val d = resources.displayMetrics.density
+        private val pText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF8A8F98.toInt(); textSize = 10f * d }
+        private val pLabel = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFCDD2D6.toInt(); textSize = 12f * d; isFakeBoldText = true }
+        private val pGrid = Paint().apply { color = 0xFF2A2E33.toInt(); strokeWidth = 1f }
+        private val pAxis = Paint().apply { color = 0xFF3A3F45.toInt(); strokeWidth = 1f }
+        private val pLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f * d }
+        private val pDash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeWidth = 1f * d; pathEffect = DashPathEffect(floatArrayOf(6f, 6f), 0f)
+        }
+        private val pFill = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        override fun onDraw(canvas: Canvas) {
+            if (hours.isEmpty() || width == 0 || height == 0) return
+            val w = width.toFloat()
+            val L = 34f * d; val R = w - 12f * d
+            val top0 = 18f * d; val bottomAxis = 22f * d; val gap = 26f * d
+            val panelH = (height - top0 - bottomAxis - 2 * gap) / 3f
+            val fullBottom = top0 + 3 * panelH + 2 * gap
+            fun xF(hh: Float) = L + (R - L) * hh / 24f
+
+            // Hintergrund nach Spritzbarkeit
+            for (s in hours) {
+                val sc = s.optInt("score")
+                val c = if (sc >= 58) 0x225AC47A else if (sc < 38) 0x22E0625A else 0
+                if (c != 0) {
+                    pFill.color = c
+                    canvas.drawRect(xF(s.optInt("h").toFloat()), top0, xF(s.optInt("h") + 1f), fullBottom, pFill)
+                }
+            }
+
+            val panels = listOf(
+                arrayOf("temp", "Temperatur", "°C", "0xFFE0B34A"),
+                arrayOf("wind", "Wind", "km/h", "0xFF39D3E0"),
+                arrayOf("regen", "Regen", "mm", "0xFF5AA9E0")
+            )
+            panels.forEachIndexed { pi, panel ->
+                val key = panel[0]; val color = panel[3].substring(2).toLong(16).toInt()
+                val pt = top0 + pi * (panelH + gap); val pb = pt + panelH
+                val vals = ArrayList<Double>(hours.size)
+                for (s in hours) vals.add(s.optDouble(key, 0.0))
+                var mn = vals.minOrNull() ?: 0.0; var mx = vals.maxOrNull() ?: 1.0
+                if (key == "regen") { mn = 0.0; mx = maxOf(1.0, mx) }
+                if (mx - mn < 0.5) mx = mn + 1.0
+                fun yF(v: Double) = (pb - (pb - pt) * ((v - mn) / (mx - mn))).toFloat()
+
+                for (vv in listOf(mn, (mn + mx) / 2, mx)) {
+                    val y = yF(vv)
+                    canvas.drawLine(L, y, R, y, pGrid)
+                    pText.textAlign = Paint.Align.RIGHT
+                    canvas.drawText(fmtNum(vv), L - 4f * d, y + 3f * d, pText)
+                }
+                canvas.drawLine(L, pt, L, pb, pAxis)
+                canvas.drawLine(L, pb, R, pb, pAxis)
+                pLabel.textAlign = Paint.Align.LEFT
+                canvas.drawText("${panel[1]} (${panel[2]})", L, pt - 5f * d, pLabel)
+
+                if (key == "regen") {
+                    pFill.color = color
+                    var anyRain = false
+                    for (s in hours) {
+                        val v = s.optDouble("regen", 0.0); if (v <= 0) continue; anyRain = true
+                        canvas.drawRect(xF(s.optInt("h") + 0.1f), yF(v), xF(s.optInt("h") + 0.9f), pb, pFill)
+                    }
+                    if (!anyRain) {
+                        pText.textAlign = Paint.Align.CENTER
+                        canvas.drawText("kein Regen erwartet", (L + R) / 2, (pt + pb) / 2, pText)
+                    }
+                } else {
+                    if (key == "wind") {
+                        val path = Path()
+                        hours.forEachIndexed { idx, s ->
+                            val x = xF(s.optInt("h").toFloat()); val y = yF(s.optDouble("boe", 0.0))
+                            if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        }
+                        pDash.color = color; canvas.drawPath(path, pDash)
+                    }
+                    val path = Path()
+                    hours.forEachIndexed { idx, s ->
+                        val x = xF(s.optInt("h").toFloat()); val y = yF(s.optDouble(key, 0.0))
+                        if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    pLine.color = color; canvas.drawPath(path, pLine)
+                }
+            }
+            pText.textAlign = Paint.Align.CENTER
+            var hh = 0
+            while (hh <= 24) {
+                val x = xF(hh.toFloat())
+                canvas.drawLine(x, fullBottom, x, fullBottom + 4f * d, pAxis)
+                canvas.drawText(hh.toString(), x, fullBottom + 15f * d, pText)
+                hh += 3
+            }
         }
     }
 
