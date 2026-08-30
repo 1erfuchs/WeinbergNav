@@ -53,6 +53,23 @@ class MainActivity : AppCompatActivity() {
     private var follow = true
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
 
+    /** Automatischer Serverabgleich alle 5 Minuten, solange die App offen ist. */
+    private val syncIntervalMs = 5 * 60 * 1000L
+    private val syncTick = object : Runnable {
+        override fun run() {
+            if (Sync.configured) autoSync()
+            ui.postDelayed(this, syncIntervalMs)
+        }
+    }
+
+    /** Alle 5 Minuten automatisch synchronisieren, solange eine Fahrt/Arbeit läuft. */
+    private val periodicSync = object : Runnable {
+        override fun run() {
+            if (Sync.configured && TrackingService.running) autoSync()
+            ui.postDelayed(this, 5 * 60 * 1000L)
+        }
+    }
+
     private var boundaryMode = false
     private val boundaryPts = mutableListOf<Pt>()
 
@@ -112,6 +129,8 @@ class MainActivity : AppCompatActivity() {
 
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
+
+        ui.postDelayed(periodicSync, 5 * 60 * 1000L)   // 5-Minuten-Sync während der Arbeit
 
         b.map.setTileSource(esri)
         b.map.setMultiTouchControls(true)
@@ -1419,7 +1438,11 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("${f.name} – Aufgaben")
-            .setItems(labels) { _, i -> cycleTaskState(tasks[i], f) }
+            .setItems(labels) { _, i ->
+                val t = tasks[i]
+                if (t.typ.contains("Lese", true) || t.typ.contains("Ernte", true)) ernteDialog(t, f)
+                else cycleTaskState(t, f)
+            }
             .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
             .setNegativeButton("Schließen", null)
             .show()
@@ -1443,6 +1466,93 @@ class MainActivity : AppCompatActivity() {
         Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
         val wort = when (next) { "arbeit" -> "in Arbeit"; "fertig" -> "erledigt"; else -> "offen" }
         toast("\"${t.title}\" für ${f.name}: $wort")
+    }
+
+    /** Lese-Zählung für ein Feld: Boxen (Bez. 23) / Lesewägen (Bez. 21), mit Aufgaben-Summe. */
+    private fun ernteDialog(t: Task, f: Field) {
+        val units = when (f.bezirk.trim()) {
+            "23" -> listOf("box"); "21" -> listOf("wag"); else -> listOf("box", "wag")
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(20), dpx(10), dpx(20), dpx(6))
+        }
+        val totalView = TextView(this).apply {
+            textSize = 14f; setTextColor(0xFFCDD2D6.toInt()); setPadding(0, dpx(14), 0, dpx(4))
+        }
+        fun taskTotals(): Pair<Int, Int> {
+            var b = 0; var w = 0
+            for (e in Store.activeErnte()) if (e.taskId == t.id) { b += e.boxen; w += e.waegen }
+            return b to w
+        }
+        fun refreshTotals() {
+            val (b, w) = taskTotals()
+            totalView.text = "Aufgabe gesamt:  $b Boxen · $w Lesewägen"
+        }
+        for (u in units) {
+            val istBox = u == "box"
+            root.addView(TextView(this).apply {
+                text = if (istBox) "Boxen" else "Lesewägen"
+                textSize = 16f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(4))
+            })
+            val num = TextView(this).apply {
+                textSize = 32f; setTextColor(0xFF5AC47A.toInt())
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            fun readVal(): Int = Store.ernteFor(t.id, f.id)?.let { if (istBox) it.boxen else it.waegen } ?: 0
+            num.text = readVal().toString()
+            fun apply(newVal: Int) {
+                val e = Store.ernteFor(t.id, f.id)
+                val b = if (istBox) newVal else (e?.boxen ?: 0)
+                val w = if (!istBox) newVal else (e?.waegen ?: 0)
+                Store.setErnte(t.id, f.id, b, w)
+                num.text = readVal().toString(); refreshTotals()
+                if (Sync.configured) autoSync()
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            val minus = Button(this).apply {
+                text = "−"; textSize = 24f
+                layoutParams = LinearLayout.LayoutParams(dpx(64), dpx(60))
+                setOnClickListener { apply((readVal() - 1).coerceAtLeast(0)) }
+            }
+            val plus = Button(this).apply {
+                text = "+"; textSize = 24f
+                layoutParams = LinearLayout.LayoutParams(dpx(64), dpx(60))
+                setOnClickListener { apply(readVal() + 1) }
+            }
+            row.addView(minus); row.addView(num); row.addView(plus)
+            root.addView(row)
+            val setRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, dpx(4), 0, 0)
+            }
+            val edit = EditText(this).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                hint = "Zahl direkt setzen"
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val ok = Button(this).apply {
+                text = "setzen"
+                setOnClickListener {
+                    edit.text.toString().toIntOrNull()?.let { apply(it.coerceAtLeast(0)); edit.setText("") }
+                }
+            }
+            setRow.addView(edit); setRow.addView(ok)
+            root.addView(setRow)
+        }
+        root.addView(totalView)
+        refreshTotals()
+        AlertDialog.Builder(this)
+            .setTitle("Lese – ${f.name}")
+            .setView(ScrollView(this).apply { addView(root) })
+            .setPositiveButton("Fertig", null)
+            .setNeutralButton("Status ▸") { _, _ -> cycleTaskState(t, f) }
+            .show()
     }
 
     /** Aufgaben-Menue (im Mehr-Menue) */
@@ -1720,6 +1830,9 @@ class MainActivity : AppCompatActivity() {
         refresh()
         // Beim Öffnen automatisch mit dem Server abgleichen (falls eingerichtet)
         if (Sync.configured && !TrackingService.running) autoSync()
+        // ... und danach alle 5 Minuten wiederholen, solange die App offen ist
+        ui.removeCallbacks(syncTick)
+        if (Sync.configured) ui.postDelayed(syncTick, syncIntervalMs)
     }
 
     private fun autoSync() {
@@ -1736,6 +1849,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         b.map.onPause()
+        ui.removeCallbacks(syncTick)
     }
 
     override fun onDestroy() {

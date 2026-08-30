@@ -11,6 +11,7 @@ import android.location.Location
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -123,6 +124,22 @@ class TrackingService : Service() {
         // Laeuft immer mit - auch als Rueckfall, falls Bluetooth abreisst.
         startFused()
         notifyUi()
+
+        // Waehrend der Fahrt alle 5 Minuten mit dem Server abgleichen (z. B. Lese-Zahlen),
+        // auch wenn die App im Hintergrund ist.
+        svcUi.removeCallbacks(syncTick)
+        svcUi.postDelayed(syncTick, SYNC_INTERVAL_MS)
+    }
+
+    private val svcUi = Handler(Looper.getMainLooper())
+    private val SYNC_INTERVAL_MS = 5 * 60 * 1000L
+    private val syncTick = object : Runnable {
+        override fun run() {
+            if (running) {
+                Store.syncTaskSoon()
+                svcUi.postDelayed(this, SYNC_INTERVAL_MS)
+            }
+        }
     }
 
     @android.annotation.SuppressLint("MissingPermission")
@@ -152,6 +169,8 @@ class TrackingService : Service() {
     private fun stopTracking() {
         if (!running) { stopSelf(); return }
         running = false
+        svcUi.removeCallbacks(syncTick)
+        runCatching { Store.syncTaskSoon() }   // letzten Stand noch senden
         runCatching { fused?.removeLocationUpdates(locCb) }
         bt?.stop(); bt = null
         ntrip?.stop(); ntrip = null
