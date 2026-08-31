@@ -77,6 +77,7 @@ object Sync {
                 payload.put("tasks", changedArray(Store.tasks.map { it.toJson() to it.updatedAt }))
                 payload.put("meldungen", changedArray(Store.meldungen.map { it.toJson() to it.updatedAt }))
                 payload.put("ernte", changedArray(Store.ernte.map { it.toJson() to it.updatedAt }))
+                payload.put("lieferung", changedArray(Store.lieferungen.map { it.toJson() to it.updatedAt }))
 
                 val (code, text) = post(base() + "/sync.php", payload.toString(), Store.serverToken)
                 if (code == 401) { busy = false; onDone(false, "Sitzung abgelaufen – neu anmelden"); return@thread }
@@ -94,11 +95,19 @@ object Sync {
                 changed = mergeTasks(j.optJSONArray("tasks")) { s -> if (s > maxSrv) maxSrv = s } || changed
                 changed = mergeMeldungen(j.optJSONArray("meldungen")) { s -> if (s > maxSrv) maxSrv = s } || changed
                 changed = mergeErnte(j.optJSONArray("ernte")) { s -> if (s > maxSrv) maxSrv = s } || changed
+                changed = mergeLieferung(j.optJSONArray("lieferung")) { s -> if (s > maxSrv) maxSrv = s } || changed
+
+                // Sorten-Liste vom Server (read-only, im Web gepflegt)
+                j.optJSONArray("sorten")?.let { sa ->
+                    val list = ArrayList<String>(sa.length())
+                    for (i in 0 until sa.length()) list.add(sa.optString(i, ""))
+                    Store.setSorten(list)
+                }
 
                 Store.syncSince = maxSrv
                 Store.lastPush = t0
                 Store.savePrefs()
-                if (changed) { Store.saveFields(); Store.saveSessions(); Store.saveNotes(); Store.saveTasks(); Store.saveMeldungen(); Store.saveErnte() }
+                if (changed) { Store.saveFields(); Store.saveSessions(); Store.saveNotes(); Store.saveTasks(); Store.saveMeldungen(); Store.saveErnte(); Store.saveLieferungen() }
 
                 busy = false
                 val pushed = j.optInt("pushed", 0)
@@ -209,6 +218,22 @@ object Sync {
             if (cur == null) { Store.ernte.add(inc); changed = true }
             else if (inc.updatedAt > cur.updatedAt) {
                 Store.ernte[Store.ernte.indexOf(cur)] = inc; changed = true
+            }
+        }
+        return changed
+    }
+
+    private fun mergeLieferung(arr: JSONArray?, onSrv: (Long) -> Unit): Boolean {
+        if (arr == null) return false
+        var changed = false
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            onSrv(o.optLong("_srv", 0))
+            val inc = Lieferung.fromJson(o)
+            val cur = Store.lieferungen.firstOrNull { it.id == inc.id }
+            if (cur == null) { Store.lieferungen.add(inc); changed = true }
+            else if (inc.updatedAt > cur.updatedAt) {
+                Store.lieferungen[Store.lieferungen.indexOf(cur)] = inc; changed = true
             }
         }
         return changed

@@ -19,6 +19,8 @@ object Store {
     var tasks = mutableListOf<Task>()
     var meldungen = mutableListOf<Meldung>()
     var ernte = mutableListOf<Ernte>()
+    var lieferungen = mutableListOf<Lieferung>()
+    var sorten = mutableListOf<String>()   // vom Server gepflegte Sorten-Liste
 
     var widthM: Double = 2.0
     var night: Boolean = false
@@ -60,6 +62,8 @@ object Store {
             ntripMount = p.getString("ntripMount", "") ?: ""
             ntripUser = p.getString("ntripUser", "") ?: ""
             ntripPass = p.getString("ntripPass", "") ?: ""
+            sorten = ((p.getString("sorten", "") ?: "").split("\n")
+                .map { it.trim() }.filter { it.isNotEmpty() }).toMutableList()
         }
         fields = readList("fields.json") { Field.fromJson(it) }
         sessions = readList("sessions.json") { Session.fromJson(it) }
@@ -67,6 +71,7 @@ object Store {
         tasks = readList("tasks.json") { Task.fromJson(it) }
         meldungen = readList("meldungen.json") { Meldung.fromJson(it) }
         ernte = readList("ernte.json") { Ernte.fromJson(it) }
+        lieferungen = readList("lieferung.json") { Lieferung.fromJson(it) }
     }
 
     fun savePrefs() {
@@ -85,6 +90,7 @@ object Store {
             .putString("ntripMount", ntripMount)
             .putString("ntripUser", ntripUser)
             .putString("ntripPass", ntripPass)
+            .putString("sorten", sorten.joinToString("\n"))
             .apply()
     }
 
@@ -115,8 +121,40 @@ object Store {
     fun saveTasks() = writeList("tasks.json", JSONArray().also { a -> tasks.forEach { a.put(it.toJson()) } })
     fun saveMeldungen() = writeList("meldungen.json", JSONArray().also { a -> meldungen.forEach { a.put(it.toJson()) } })
     fun saveErnte() = writeList("ernte.json", JSONArray().also { a -> ernte.forEach { a.put(it.toJson()) } })
+    fun saveLieferungen() = writeList("lieferung.json", JSONArray().also { a -> lieferungen.forEach { a.put(it.toJson()) } })
 
     fun activeErnte() = ernte.filter { !it.deleted }
+    fun activeLieferungen() = lieferungen.filter { !it.deleted }
+
+    /** Lieferungen einer Aufgabe für ein Feld (neueste zuerst). */
+    fun lieferungenFor(taskId: String, fieldId: String) =
+        activeLieferungen().filter { it.taskId == taskId && it.fieldId == fieldId }
+            .sortedByDescending { it.ts }
+
+    /** Neue Lieferung anlegen (append-only) und lokal speichern. */
+    fun addLieferung(taskId: String, fieldId: String, sorte: String, einheit: String, menge: Int): Lieferung {
+        val l = Lieferung(
+            id = newId("lf"), taskId = taskId, fieldId = fieldId,
+            ts = System.currentTimeMillis(), sorte = sorte.trim(),
+            einheit = if (einheit == "wag") "wag" else "box",
+            menge = menge.coerceAtLeast(0), user = user
+        )
+        lieferungen.add(l); saveLieferungen()
+        return l
+    }
+
+    /** Lieferung als gelöscht markieren (bleibt für den Sync erhalten). */
+    fun deleteLieferung(id: String) {
+        lieferungen.firstOrNull { it.id == id }?.let {
+            it.deleted = true; it.updatedAt = System.currentTimeMillis(); saveLieferungen()
+        }
+    }
+
+    /** Sorten-Liste (vom Server) übernehmen und merken. */
+    fun setSorten(list: List<String>) {
+        val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
+        if (clean != sorten) { sorten = clean.toMutableList(); savePrefs() }
+    }
 
     /** Zählung einer Aufgabe für ein Feld (oder null). */
     fun ernteFor(taskId: String, fieldId: String): Ernte? =

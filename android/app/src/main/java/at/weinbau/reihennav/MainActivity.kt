@@ -1440,8 +1440,8 @@ class MainActivity : AppCompatActivity() {
             .setTitle("${f.name} – Aufgaben")
             .setItems(labels) { _, i ->
                 val t = tasks[i]
-                if (t.typ.contains("Lese", true) || t.typ.contains("Ernte", true)) ernteDialog(t, f)
-                else cycleTaskState(t, f)
+                if (t.typ.contains("Lese", true) || t.typ.contains("Ernte", true)) lieferDialog(t, f)
+                else statusDialog(t, f)
             }
             .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
             .setNegativeButton("Schließen", null)
@@ -1552,6 +1552,161 @@ class MainActivity : AppCompatActivity() {
             .setView(ScrollView(this).apply { addView(root) })
             .setPositiveButton("Fertig", null)
             .setNeutralButton("Status ▸") { _, _ -> cycleTaskState(t, f) }
+            .show()
+    }
+
+    /** Feld-Status direkt setzen (offen / in Arbeit / erledigt). */
+    private fun setFieldState(t: Task, f: Field, state: String) {
+        val now = System.currentTimeMillis()
+        if (state == "offen") t.done.remove(f.id)
+        else {
+            val since = if (state == "arbeit") now else (t.done[f.id]?.since?.takeIf { it > 0 } ?: now)
+            val cov = if (state == "fertig") 1.0 else (t.done[f.id]?.cov ?: 0.0)
+            t.done[f.id] = FieldMark(state, now, Store.user, since, cov)
+        }
+        t.updatedAt = now
+        Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
+    }
+
+    /** Status-Auswahl statt Durchklicken. */
+    private fun statusDialog(t: Task, f: Field) {
+        val opts = arrayOf("offen", "in Arbeit", "erledigt")
+        val cur = when (t.stateOf(f.id)) { "arbeit" -> 1; "fertig" -> 2; else -> 0 }
+        AlertDialog.Builder(this)
+            .setTitle("${f.name} – Status")
+            .setSingleChoiceItems(opts, cur) { d, which ->
+                setFieldState(t, f, when (which) { 1 -> "arbeit"; 2 -> "fertig"; else -> "offen" })
+                toast("${f.name}: ${opts[which]}")
+                d.dismiss()
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    /** Lieferbuch: einzelne Anlieferungen erfassen (Sorte · Einheit · Menge). */
+    private fun lieferDialog(t: Task, f: Field) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(20), dpx(10), dpx(20), dpx(6))
+        }
+        var sorte = Store.sorten.firstOrNull() ?: ""
+        var einheit = "box"
+        var menge = 1
+
+        // Sorte
+        root.addView(TextView(this).apply {
+            text = "Sorte"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(6), 0, dpx(2))
+        })
+        val sorteEdit = EditText(this).apply { hint = "Sorte eingeben"; setText(sorte) }
+        val sorteBtn = Button(this).apply { text = if (sorte.isEmpty()) "Sorte wählen" else sorte }
+        if (Store.sorten.isEmpty()) {
+            root.addView(sorteEdit)
+        } else {
+            sorteBtn.setOnClickListener {
+                AlertDialog.Builder(this).setTitle("Sorte")
+                    .setItems(Store.sorten.toTypedArray()) { _, i -> sorte = Store.sorten[i]; sorteBtn.text = sorte }
+                    .show()
+            }
+            root.addView(sorteBtn)
+        }
+
+        // Einheit
+        root.addView(TextView(this).apply {
+            text = "Einheit"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2))
+        })
+        val boxBtn = Button(this).apply {
+            text = "Boxen"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val wagBtn = Button(this).apply {
+            text = "Lesewägen"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        fun styleEinheit() {
+            boxBtn.setBackgroundColor(if (einheit == "box") 0xFF5AC47A.toInt() else 0xFF3A3F45.toInt())
+            wagBtn.setBackgroundColor(if (einheit == "wag") 0xFF5AC47A.toInt() else 0xFF3A3F45.toInt())
+        }
+        boxBtn.setOnClickListener { einheit = "box"; styleEinheit() }
+        wagBtn.setOnClickListener { einheit = "wag"; styleEinheit() }
+        styleEinheit()
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; addView(boxBtn); addView(wagBtn)
+        })
+
+        // Menge
+        root.addView(TextView(this).apply {
+            text = "Menge"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2))
+        })
+        val mengeView = TextView(this).apply {
+            textSize = 28f; setTextColor(0xFF5AC47A.toInt()); gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            text = menge.toString()
+        }
+        val mMinus = Button(this).apply {
+            text = "−"; textSize = 22f; layoutParams = LinearLayout.LayoutParams(dpx(60), dpx(56))
+            setOnClickListener { menge = (menge - 1).coerceAtLeast(1); mengeView.text = menge.toString() }
+        }
+        val mPlus = Button(this).apply {
+            text = "+"; textSize = 22f; layoutParams = LinearLayout.LayoutParams(dpx(60), dpx(56))
+            setOnClickListener { menge += 1; mengeView.text = menge.toString() }
+        }
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(mMinus); addView(mengeView); addView(mPlus)
+        })
+
+        val totalView = TextView(this).apply {
+            textSize = 14f; setTextColor(0xFFCDD2D6.toInt()); setPadding(0, dpx(12), 0, dpx(2))
+        }
+        val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dpx(4), 0, 0) }
+        val tf = SimpleDateFormat("HH:mm", Locale.GERMAN)
+        fun refreshList() {
+            listBox.removeAllViews()
+            val ls = Store.lieferungenFor(t.id, f.id)
+            var sb = 0; var sw = 0
+            for (l in ls) { if (l.einheit == "wag") sw += l.menge else sb += l.menge }
+            totalView.text = "Feld gesamt:  $sb Boxen · $sw Lesewägen"
+            if (ls.isEmpty()) {
+                listBox.addView(TextView(this).apply {
+                    text = "Noch keine Lieferung erfasst."; setTextColor(0xFF9AA0A6.toInt()); textSize = 13f
+                })
+            } else for (l in ls) {
+                val eLabel = if (l.einheit == "wag") "Lesewägen" else "Boxen"
+                listBox.addView(TextView(this).apply {
+                    text = "${tf.format(Date(l.ts))}  ·  ${l.sorte}  ·  ${l.menge} $eLabel"
+                    setTextColor(0xFFE8E8E8.toInt()); textSize = 14f; setPadding(0, dpx(6), 0, dpx(6))
+                    setOnLongClickListener {
+                        AlertDialog.Builder(this@MainActivity).setTitle("Lieferung löschen")
+                            .setMessage("${l.sorte} · ${l.menge} $eLabel wirklich löschen?")
+                            .setPositiveButton("Löschen") { _, _ ->
+                                Store.deleteLieferung(l.id); if (Sync.configured) autoSync(); refreshList()
+                            }
+                            .setNegativeButton("Abbrechen", null).show()
+                        true
+                    }
+                })
+            }
+        }
+
+        root.addView(Button(this).apply {
+            text = "＋ Lieferung speichern"
+            setOnClickListener {
+                val s = if (Store.sorten.isEmpty()) sorteEdit.text.toString().trim() else sorte
+                if (s.isBlank()) { toast("Bitte Sorte angeben"); return@setOnClickListener }
+                if (menge <= 0) { toast("Menge muss größer 0 sein"); return@setOnClickListener }
+                Store.addLieferung(t.id, f.id, s, einheit, menge)
+                if (Sync.configured) autoSync()
+                menge = 1; mengeView.text = "1"; refreshList()
+                toast("Lieferung gespeichert")
+            }
+        })
+        root.addView(totalView)
+        root.addView(listBox)
+        refreshList()
+
+        AlertDialog.Builder(this)
+            .setTitle("Lieferung – ${f.name}")
+            .setView(ScrollView(this).apply { addView(root) })
+            .setPositiveButton("Fertig", null)
+            .setNeutralButton("Status ▸") { _, _ -> statusDialog(t, f) }
             .show()
     }
 

@@ -514,3 +514,42 @@ data class Ernte(
         )
     }
 }
+
+/**
+ * Eine einzelne Trauben-Anlieferung bei der Lese (Lieferbuch).
+ * Append-only: jede Anlieferung ist ein eigener Eintrag, damit pro Weingarten
+ * mehrere Lieferungen und verschiedene Sorten möglich sind.
+ * einheit = "box" (Boxen) oder "wag" (Lesewägen).
+ */
+data class Lieferung(
+    var id: String,
+    var taskId: String = "",
+    var fieldId: String = "",
+    var ts: Long = System.currentTimeMillis(),   // Zeitpunkt der Lieferung
+    var sorte: String = "",
+    var einheit: String = "box",
+    var menge: Int = 0,
+    var user: String = "",
+    var updatedAt: Long = System.currentTimeMillis(),
+    var deleted: Boolean = false
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("taskId", taskId); put("fieldId", fieldId)
+        put("ts", ts); put("sorte", sorte); put("einheit", einheit); put("menge", menge)
+        put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
+    }
+    companion object {
+        fun fromJson(o: JSONObject) = Lieferung(
+            id = o.getString("id"),
+            taskId = o.optString("taskId", ""),
+            fieldId = o.optString("fieldId", ""),
+            ts = o.optLong("ts", System.currentTimeMillis()),
+            sorte = o.optString("sorte", ""),
+            einheit = o.optString("einheit", "box"),
+            menge = o.optInt("menge", 0),
+            user = o.optString("user", ""),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
+            deleted = o.optBoolean("deleted", false)
+        )
+    }
+}
