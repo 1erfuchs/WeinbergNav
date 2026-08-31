@@ -101,7 +101,7 @@ object Sync {
                 j.optJSONArray("sorten")?.let { sa ->
                     val list = ArrayList<String>(sa.length())
                     for (i in 0 until sa.length()) list.add(sa.optString(i, ""))
-                    Store.setSorten(list)
+                    Store.updateSorten(list)
                 }
 
                 Store.syncSince = maxSrv

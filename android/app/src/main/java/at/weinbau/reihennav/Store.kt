@@ -151,7 +151,7 @@ object Store {
     }
 
     /** Sorten-Liste (vom Server) übernehmen und merken. */
-    fun setSorten(list: List<String>) {
+    fun updateSorten(list: List<String>) {
         val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
         if (clean != sorten) { sorten = clean.toMutableList(); savePrefs() }
     }
