@@ -18,6 +18,7 @@ object Store {
     var notes = mutableListOf<Note>()
     var tasks = mutableListOf<Task>()
     var meldungen = mutableListOf<Meldung>()
+    var ernte = mutableListOf<Ernte>()
 
     var widthM: Double = 2.0
     var night: Boolean = false
@@ -65,6 +66,7 @@ object Store {
         notes = readList("notes.json") { Note.fromJson(it) }
         tasks = readList("tasks.json") { Task.fromJson(it) }
         meldungen = readList("meldungen.json") { Meldung.fromJson(it) }
+        ernte = readList("ernte.json") { Ernte.fromJson(it) }
     }
 
     fun savePrefs() {
@@ -112,6 +114,26 @@ object Store {
     fun saveNotes() = writeList("notes.json", JSONArray().also { a -> notes.forEach { a.put(it.toJson()) } })
     fun saveTasks() = writeList("tasks.json", JSONArray().also { a -> tasks.forEach { a.put(it.toJson()) } })
     fun saveMeldungen() = writeList("meldungen.json", JSONArray().also { a -> meldungen.forEach { a.put(it.toJson()) } })
+    fun saveErnte() = writeList("ernte.json", JSONArray().also { a -> ernte.forEach { a.put(it.toJson()) } })
+
+    fun activeErnte() = ernte.filter { !it.deleted }
+
+    /** Zählung einer Aufgabe für ein Feld (oder null). */
+    fun ernteFor(taskId: String, fieldId: String): Ernte? =
+        ernte.firstOrNull { it.taskId == taskId && it.fieldId == fieldId && !it.deleted }
+
+    /** Boxen/Wägen für ein Feld setzen und lokal speichern. */
+    fun setErnte(taskId: String, fieldId: String, boxen: Int, waegen: Int) {
+        val eid = "$taskId:$fieldId"
+        val cur = ernte.firstOrNull { it.id == eid }
+        if (cur == null) {
+            ernte.add(Ernte(eid, taskId, fieldId, boxen.coerceAtLeast(0), waegen.coerceAtLeast(0), user))
+        } else {
+            cur.boxen = boxen.coerceAtLeast(0); cur.waegen = waegen.coerceAtLeast(0)
+            cur.user = user; cur.updatedAt = System.currentTimeMillis(); cur.deleted = false
+        }
+        saveErnte()
+    }
 
     fun activeFields() = fields.filter { !it.deleted }
     fun activeSessions() = sessions.filter { !it.deleted }

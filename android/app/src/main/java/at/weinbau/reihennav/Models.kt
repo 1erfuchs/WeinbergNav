@@ -480,3 +480,37 @@ object Geo {
     fun coverage(poly: List<Pt>, track: List<Pt>, widthM: Double, cellM: Double = 0.0): Double =
         coverageMulti(poly, listOf(track), widthM, cellM)
 }
+
+/**
+ * Lesezählung je Aufgabe und Feld (Boxen in Bez. 23, Lesewägen in Bez. 21).
+ * Ein Datensatz pro (Aufgabe × Feld) -> jedes Gerät schreibt nur seine eigenen
+ * Felder, dadurch überschreiben sich die Geräte beim Sync nicht gegenseitig.
+ */
+data class Ernte(
+    var id: String,                 // "<taskId>:<fieldId>"
+    var taskId: String,
+    var fieldId: String,
+    var boxen: Int = 0,
+    var waegen: Int = 0,
+    var user: String = "",
+    var updatedAt: Long = System.currentTimeMillis(),
+    var deleted: Boolean = false
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("taskId", taskId); put("fieldId", fieldId)
+        put("boxen", boxen); put("waegen", waegen)
+        put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
+    }
+    companion object {
+        fun fromJson(o: JSONObject) = Ernte(
+            id = o.getString("id"),
+            taskId = o.optString("taskId", ""),
+            fieldId = o.optString("fieldId", ""),
+            boxen = o.optInt("boxen", 0),
+            waegen = o.optInt("waegen", 0),
+            user = o.optString("user", ""),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
+            deleted = o.optBoolean("deleted", false)
+        )
+    }
+}
