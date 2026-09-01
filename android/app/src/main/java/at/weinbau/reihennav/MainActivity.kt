@@ -750,7 +750,8 @@ class MainActivity : AppCompatActivity() {
                 val e = if (l.einheit == "wag") "Lesewägen" else "Boxen"
                 listBox.addView(TextView(this).apply {
                     text = "${tf.format(Date(l.ts))} · ${nameById[l.fieldId] ?: "?"}\n${l.sorte} · ${l.menge} $e" +
-                        (if (l.user.isNotBlank()) " · ${l.user}" else "")
+                        (if (l.user.isNotBlank()) " · ${l.user}" else "") +
+                        (if (l.notiz.isNotBlank()) "\n📝 ${l.notiz}" else "")
                     setTextColor(0xFFE8E8E8.toInt()); textSize = 15f; setPadding(0, dpx(9), 0, dpx(9))
                     setOnClickListener { lieferEditDialog(l) { refresh() } }
                 })
@@ -821,12 +822,16 @@ class MainActivity : AppCompatActivity() {
             addView(mMinus); addView(mengeView); addView(mPlus)
         })
 
+        root.addView(TextView(this).apply { text = "Notiz (optional)"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2)) })
+        val notizEdit = EditText(this).apply { setText(l.notiz) }
+        root.addView(notizEdit)
+
         AlertDialog.Builder(this)
             .setTitle("Lieferung bearbeiten")
             .setView(ScrollView(this).apply { addView(root) })
             .setPositiveButton("Speichern") { _, _ ->
                 val s = (if (Store.sorten.isEmpty()) sorteEdit.text.toString().trim() else sorte).ifBlank { l.sorte }
-                Store.updateLieferung(l.id, s, einheit, menge)
+                Store.updateLieferung(l.id, s, einheit, menge, notizEdit.text.toString())
                 if (Sync.configured) autoSync()
                 toast("Gespeichert"); onChanged()
             }
@@ -1859,6 +1864,11 @@ class MainActivity : AppCompatActivity() {
             addView(mMinus); addView(mengeView); addView(mPlus)
         })
 
+        root.addView(TextView(this).apply { text = "Notiz (optional)"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2)) })
+        val notizEdit = EditText(this).apply { hint = "z. B. nass, faul, für Sekt …" }
+
+        root.addView(notizEdit)
+
         val totalView = TextView(this).apply {
             textSize = 14f; setTextColor(0xFFCDD2D6.toInt()); setPadding(0, dpx(12), 0, dpx(2))
         }
@@ -1877,7 +1887,8 @@ class MainActivity : AppCompatActivity() {
             } else for (l in ls) {
                 val eLabel = if (l.einheit == "wag") "Lesewägen" else "Boxen"
                 listBox.addView(TextView(this).apply {
-                    text = "${tf.format(Date(l.ts))}  ·  ${l.sorte}  ·  ${l.menge} $eLabel"
+                    text = "${tf.format(Date(l.ts))}  ·  ${l.sorte}  ·  ${l.menge} $eLabel" +
+                        (if (l.notiz.isNotBlank()) "\n📝 ${l.notiz}" else "")
                     setTextColor(0xFFE8E8E8.toInt()); textSize = 14f; setPadding(0, dpx(6), 0, dpx(6))
                     setOnClickListener { lieferEditDialog(l) { refreshList() } }
                 })
@@ -1890,9 +1901,10 @@ class MainActivity : AppCompatActivity() {
                 val s = if (Store.sorten.isEmpty()) sorteEdit.text.toString().trim() else sorte
                 if (s.isBlank()) { toast("Bitte Sorte angeben"); return@setOnClickListener }
                 if (menge <= 0) { toast("Menge muss größer 0 sein"); return@setOnClickListener }
-                Store.addLieferung(t.id, f.id, s, einheit, menge)
+                Store.addLieferung(t.id, f.id, s, einheit, menge, notizEdit.text.toString())
                 if (Sync.configured) autoSync()
                 menge = 1; mengeView.text = "1"; refreshList()
+                notizEdit.setText("")
                 toast("Lieferung gespeichert")
             }
         })

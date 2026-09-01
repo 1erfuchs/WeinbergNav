@@ -529,6 +529,7 @@ data class Lieferung(
     var sorte: String = "",
     var einheit: String = "box",
     var menge: Int = 0,
+    var notiz: String = "",
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
     var deleted: Boolean = false
@@ -536,7 +537,7 @@ data class Lieferung(
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("taskId", taskId); put("fieldId", fieldId)
         put("ts", ts); put("sorte", sorte); put("einheit", einheit); put("menge", menge)
-        put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
+        put("notiz", notiz); put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
     }
     companion object {
         fun fromJson(o: JSONObject) = Lieferung(
@@ -547,6 +548,7 @@ data class Lieferung(
             sorte = o.optString("sorte", ""),
             einheit = o.optString("einheit", "box"),
             menge = o.optInt("menge", 0),
+            notiz = o.optString("notiz", ""),
             user = o.optString("user", ""),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
             deleted = o.optBoolean("deleted", false)

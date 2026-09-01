@@ -132,12 +132,12 @@ object Store {
             .sortedByDescending { it.ts }
 
     /** Neue Lieferung anlegen (append-only) und lokal speichern. */
-    fun addLieferung(taskId: String, fieldId: String, sorte: String, einheit: String, menge: Int): Lieferung {
+    fun addLieferung(taskId: String, fieldId: String, sorte: String, einheit: String, menge: Int, notiz: String = ""): Lieferung {
         val l = Lieferung(
             id = newId("lf"), taskId = taskId, fieldId = fieldId,
             ts = System.currentTimeMillis(), sorte = sorte.trim(),
             einheit = if (einheit == "wag") "wag" else "box",
-            menge = menge.coerceAtLeast(0), user = user
+            menge = menge.coerceAtLeast(0), notiz = notiz.trim(), user = user
         )
         lieferungen.add(l); saveLieferungen()
         return l
@@ -151,11 +151,12 @@ object Store {
     }
 
     /** Sorte / Einheit / Menge einer Lieferung ändern (Zeitpunkt & Feld bleiben). */
-    fun updateLieferung(id: String, sorte: String, einheit: String, menge: Int) {
+    fun updateLieferung(id: String, sorte: String, einheit: String, menge: Int, notiz: String) {
         lieferungen.firstOrNull { it.id == id }?.let {
             it.sorte = sorte.trim()
             it.einheit = if (einheit == "wag") "wag" else "box"
             it.menge = menge.coerceAtLeast(0)
+            it.notiz = notiz.trim()
             it.updatedAt = System.currentTimeMillis()
             saveLieferungen()
         }
