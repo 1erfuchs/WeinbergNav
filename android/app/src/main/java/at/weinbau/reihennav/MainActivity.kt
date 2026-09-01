@@ -57,7 +57,10 @@ class MainActivity : AppCompatActivity() {
     private val syncIntervalMs = 5 * 60 * 1000L
     private val syncTick = object : Runnable {
         override fun run() {
-            if (Sync.configured) autoSync()
+            if (Sync.configured) {
+                autoSync()
+                here()?.let { Sync.uploadPosition(it.lat, it.lng, TrackingService.lastAccM) }
+            }
             ui.postDelayed(this, syncIntervalMs)
         }
     }
@@ -723,11 +726,125 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---------- Lieferbuch-Liste (chronologisch) ----------
+    private fun lieferListeDialog() {
+        val list = Store.activeLieferungen().sortedByDescending { it.ts }
+        if (list.isEmpty()) { toast("Noch keine Lieferungen erfasst."); return }
+        val nameById = Store.activeFields().associate { it.id to it.name }
+        val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
+        var sb = 0; var sw = 0
+        for (l in list) { if (l.einheit == "wag") sw += l.menge else sb += l.menge }
+        val labels = list.map { l ->
+            val e = if (l.einheit == "wag") "Lesewägen" else "Boxen"
+            "${tf.format(Date(l.ts))} · ${nameById[l.fieldId] ?: "?"}\n${l.sorte} · ${l.menge} $e" +
+                (if (l.user.isNotBlank()) " · ${l.user}" else "")
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Lieferungen · gesamt $sb Boxen / $sw Lesewägen")
+            .setItems(labels) { _, i ->
+                val l = list[i]
+                val e = if (l.einheit == "wag") "Lesewägen" else "Boxen"
+                AlertDialog.Builder(this)
+                    .setTitle("Lieferung löschen")
+                    .setMessage("${tf.format(Date(l.ts))} · ${l.sorte} · ${l.menge} $e löschen?")
+                    .setPositiveButton("Löschen") { _, _ ->
+                        Store.deleteLieferung(l.id); if (Sync.configured) autoSync(); toast("Lieferung gelöscht")
+                    }
+                    .setNegativeButton("Abbrechen", null).show()
+            }
+            .setPositiveButton("Schließen", null)
+            .show()
+    }
+
+    // ---------- Aktuelle Positionen der anderen Nutzer ----------
+    private fun pointInPoly(p: Pt, poly: List<Pt>): Boolean {
+        if (poly.size < 3) return false
+        var inside = false; var j = poly.size - 1
+        for (i in poly.indices) {
+            val a = poly[i]; val b = poly[j]
+            if (((a.lat > p.lat) != (b.lat > p.lat)) &&
+                (p.lng < (b.lng - a.lng) * (p.lat - a.lat) / (b.lat - a.lat) + a.lng)) inside = !inside
+            j = i
+        }
+        return inside
+    }
+
+    private fun riedeFor(p: Pt): String? =
+        Store.activeFields().firstOrNull { it.coords.size >= 3 && pointInPoly(p, it.coords) }?.name
+
+    private fun minAgo(ts: Long): String {
+        val m = ((System.currentTimeMillis() - ts) / 60000L).toInt()
+        return when {
+            m <= 0 -> "gerade eben"
+            m < 60 -> "vor $m min"
+            else -> "vor ${m / 60} h ${m % 60} min"
+        }
+    }
+
+    private fun positionenDialog() {
+        if (!Sync.configured) { toast("Kein Server verbunden – bitte zuerst anmelden (Mehr → Server)."); return }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(20), dpx(10), dpx(20), dpx(8)) }
+        val status = TextView(this).apply { text = "Lade Positionen …"; setTextColor(0xFF9AA0A6.toInt()); textSize = 14f }
+        val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dpx(8), 0, 0) }
+        box.addView(status); box.addView(listBox)
+        val tf = SimpleDateFormat("HH:mm", Locale.GERMAN)
+
+        fun render(arr: org.json.JSONArray?) {
+            listBox.removeAllViews()
+            if (arr == null) { status.text = "Positionen konnten nicht geladen werden."; return }
+            val me = Store.user; val mine = here(); var count = 0
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val u = o.optString("user")
+                if (u == me || u.isBlank()) continue
+                count++
+                val p = Pt(o.optDouble("lat"), o.optDouble("lng"))
+                val ried = riedeFor(p)
+                val wo = ried?.let { "Ried $it" } ?: "unterwegs"
+                val dist = mine?.let { Geo.distM(it, p) }
+                val distS = dist?.let {
+                    " · " + if (it < 1000) "${it.toInt()} m" else String.format(Locale.GERMAN, "%.1f km", it / 1000)
+                } ?: ""
+                listBox.addView(TextView(this).apply {
+                    text = "$u\n$wo$distS · ${minAgo(o.optLong("ts"))} (${tf.format(Date(o.optLong("ts")))})"
+                    setTextColor(0xFFE8E8E8.toInt()); textSize = 15f; setPadding(0, dpx(8), 0, dpx(8))
+                })
+            }
+            status.text = if (count == 0) "Zurzeit keine anderen Nutzer aktiv."
+                          else "$count Nutzer · Stand ${tf.format(Date())}"
+        }
+        fun refresh() {
+            status.text = "Lade Positionen …"
+            val mine = here()
+            Thread {
+                val arr = Sync.fetchPositions(mine?.lat, mine?.lng, TrackingService.lastAccM)
+                runOnUiThread { render(arr) }
+            }.start()
+        }
+
+        val ticker = object : Runnable { override fun run() { refresh(); ui.postDelayed(this, 5 * 60 * 1000L) } }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Aktuelle Positionen")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Schließen", null)
+            .setNeutralButton("Aktualisieren", null)
+            .create()
+        dlg.setOnShowListener {
+            dlg.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener { refresh() }
+            refresh()
+            ui.postDelayed(ticker, 5 * 60 * 1000L)
+        }
+        dlg.setOnDismissListener { ui.removeCallbacks(ticker) }
+        dlg.show()
+    }
+
     // ---------- Einstellungen ----------
     private fun settingsDialog() {
         val konto = if (Sync.configured) "Server: angemeldet als ${Store.user}" else "Server & Konto: nicht verbunden"
         val items = arrayOf(
             "\uD83C\uDF24 Spritzfenster (wann & was)",
+            "\uD83D\uDCE6 Lieferungen (Lieferbuch)",
+            "\uD83D\uDCCD Aktuelle Positionen",
             "Aufgaben verwalten",
             "Arbeitsbreite: ${fmt(Store.widthM)} m",
             "Benutzer: ${Store.user}",
@@ -743,6 +860,8 @@ class MainActivity : AppCompatActivity() {
             .setItems(items) { _, i ->
                 when (items[i]) {
                     "\uD83C\uDF24 Spritzfenster (wann & was)" -> spritzfensterDialog()
+                    "\uD83D\uDCE6 Lieferungen (Lieferbuch)" -> lieferListeDialog()
+                    "\uD83D\uDCCD Aktuelle Positionen" -> positionenDialog()
                     "Aufgaben verwalten" -> tasksMenu()
                     "Benutzer: ${Store.user}" -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
                     konto -> serverDialog()

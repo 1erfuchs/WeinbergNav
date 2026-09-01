@@ -137,6 +137,7 @@ class TrackingService : Service() {
         override fun run() {
             if (running) {
                 Store.syncTaskSoon()
+                lastFix?.let { Sync.uploadPosition(it.lat, it.lng, lastAccM) }
                 svcUi.postDelayed(this, SYNC_INTERVAL_MS)
             }
         }

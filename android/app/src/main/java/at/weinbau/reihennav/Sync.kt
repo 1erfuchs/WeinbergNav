@@ -240,6 +240,27 @@ object Sync {
     }
 
     /** HTTP POST mit JSON; liefert (statuscode, antworttext) */
+    /** Eigene Position melden (optional) und alle aktuellen Positionen holen. */
+    fun fetchPositions(myLat: Double?, myLng: Double?, acc: Double?): org.json.JSONArray? {
+        if (!configured) return null
+        return try {
+            val b = org.json.JSONObject()
+            b.put("token", Store.serverToken)
+            if (myLat != null && myLng != null) {
+                b.put("lat", myLat); b.put("lng", myLng)
+                b.put("acc", acc ?: 0.0); b.put("ts", System.currentTimeMillis())
+            }
+            val (code, text) = post(base() + "/pos.php", b.toString(), Store.serverToken)
+            if (code in 200..299) org.json.JSONObject(text).optJSONArray("positions") else null
+        } catch (e: Exception) { null }
+    }
+
+    /** Nur die eigene Position melden (Antwort egal), im Hintergrund. */
+    fun uploadPosition(lat: Double, lng: Double, acc: Double) {
+        if (!configured) return
+        Thread { runCatching { fetchPositions(lat, lng, acc) } }.start()
+    }
+
     private fun post(urlStr: String, jsonBody: String, token: String?): Pair<Int, String> {
         val url = URL(urlStr)
         val c = url.openConnection() as HttpURLConnection
