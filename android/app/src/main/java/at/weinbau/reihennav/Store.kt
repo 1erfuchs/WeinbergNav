@@ -150,6 +150,17 @@ object Store {
         }
     }
 
+    /** Sorte / Einheit / Menge einer Lieferung ändern (Zeitpunkt & Feld bleiben). */
+    fun updateLieferung(id: String, sorte: String, einheit: String, menge: Int) {
+        lieferungen.firstOrNull { it.id == id }?.let {
+            it.sorte = sorte.trim()
+            it.einheit = if (einheit == "wag") "wag" else "box"
+            it.menge = menge.coerceAtLeast(0)
+            it.updatedAt = System.currentTimeMillis()
+            saveLieferungen()
+        }
+    }
+
     /** Sorten-Liste (vom Server) übernehmen und merken. */
     fun updateSorten(list: List<String>) {
         val clean = list.map { it.trim() }.filter { it.isNotEmpty() }

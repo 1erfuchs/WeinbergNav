@@ -726,33 +726,120 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- Lieferbuch-Liste (chronologisch) ----------
+    // ---------- Lieferbuch-Liste (chronologisch, bearbeitbar) ----------
     private fun lieferListeDialog() {
-        val list = Store.activeLieferungen().sortedByDescending { it.ts }
-        if (list.isEmpty()) { toast("Noch keine Lieferungen erfasst."); return }
+        if (Store.activeLieferungen().isEmpty()) { toast("Noch keine Lieferungen erfasst."); return }
         val nameById = Store.activeFields().associate { it.id to it.name }
         val tf = SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN)
-        var sb = 0; var sw = 0
-        for (l in list) { if (l.einheit == "wag") sw += l.menge else sb += l.menge }
-        val labels = list.map { l ->
-            val e = if (l.einheit == "wag") "Lesewägen" else "Boxen"
-            "${tf.format(Date(l.ts))} · ${nameById[l.fieldId] ?: "?"}\n${l.sorte} · ${l.menge} $e" +
-                (if (l.user.isNotBlank()) " · ${l.user}" else "")
-        }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Lieferungen · gesamt $sb Boxen / $sw Lesewägen")
-            .setItems(labels) { _, i ->
-                val l = list[i]
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(18), dpx(8), dpx(18), dpx(8)) }
+        val header = TextView(this).apply { setTextColor(0xFFCDD2D6.toInt()); textSize = 14f; setPadding(0, 0, 0, dpx(6)) }
+        val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(header); box.addView(listBox)
+
+        fun refresh() {
+            listBox.removeAllViews()
+            val list = Store.activeLieferungen().sortedByDescending { it.ts }
+            var sb = 0; var sw = 0
+            for (l in list) { if (l.einheit == "wag") sw += l.menge else sb += l.menge }
+            header.text = "Gesamt: $sb Boxen · $sw Lesewägen   (${list.size} Lieferungen · tippen zum Bearbeiten)"
+            if (list.isEmpty()) {
+                listBox.addView(TextView(this).apply { text = "Keine Lieferungen."; setTextColor(0xFF9AA0A6.toInt()); textSize = 14f })
+                return
+            }
+            for (l in list) {
                 val e = if (l.einheit == "wag") "Lesewägen" else "Boxen"
+                listBox.addView(TextView(this).apply {
+                    text = "${tf.format(Date(l.ts))} · ${nameById[l.fieldId] ?: "?"}\n${l.sorte} · ${l.menge} $e" +
+                        (if (l.user.isNotBlank()) " · ${l.user}" else "")
+                    setTextColor(0xFFE8E8E8.toInt()); textSize = 15f; setPadding(0, dpx(9), 0, dpx(9))
+                    setOnClickListener { lieferEditDialog(l) { refresh() } }
+                })
+            }
+        }
+        refresh()
+        AlertDialog.Builder(this)
+            .setTitle("Lieferungen")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Schließen", null)
+            .show()
+    }
+
+    /** Lieferung bearbeiten: Sorte & Menge änderbar (Zeitpunkt & Weingarten bleiben), plus Löschen. */
+    private fun lieferEditDialog(l: Lieferung, onChanged: () -> Unit) {
+        val fieldName = Store.activeFields().firstOrNull { it.id == l.fieldId }?.name ?: "?"
+        val tf = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMAN)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(20), dpx(10), dpx(20), dpx(6)) }
+        root.addView(TextView(this).apply {
+            text = "$fieldName  ·  ${tf.format(Date(l.ts))}"
+            setTextColor(0xFF9AA0A6.toInt()); textSize = 14f; setPadding(0, 0, 0, dpx(8))
+        })
+
+        var sorte = l.sorte
+        var einheit = l.einheit
+        var menge = l.menge
+
+        root.addView(TextView(this).apply { text = "Sorte"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(6), 0, dpx(2)) })
+        val sorteEdit = EditText(this).apply { setText(sorte) }
+        val sorteBtn = Button(this).apply { text = if (sorte.isBlank()) "Sorte wählen" else sorte }
+        if (Store.sorten.isEmpty()) root.addView(sorteEdit)
+        else {
+            sorteBtn.setOnClickListener {
+                AlertDialog.Builder(this).setTitle("Sorte")
+                    .setItems(Store.sorten.toTypedArray()) { _, i -> sorte = Store.sorten[i]; sorteBtn.text = sorte }
+                    .show()
+            }
+            root.addView(sorteBtn)
+        }
+
+        root.addView(TextView(this).apply { text = "Einheit"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2)) })
+        val boxBtn = Button(this).apply { text = "Boxen"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val wagBtn = Button(this).apply { text = "Lesewägen"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        fun styleE() {
+            boxBtn.setBackgroundColor(if (einheit == "box") 0xFF5AC47A.toInt() else 0xFF3A3F45.toInt())
+            wagBtn.setBackgroundColor(if (einheit == "wag") 0xFF5AC47A.toInt() else 0xFF3A3F45.toInt())
+        }
+        boxBtn.setOnClickListener { einheit = "box"; styleE() }
+        wagBtn.setOnClickListener { einheit = "wag"; styleE() }
+        styleE()
+        root.addView(LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; addView(boxBtn); addView(wagBtn) })
+
+        root.addView(TextView(this).apply { text = "Menge"; textSize = 15f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(2)) })
+        val mengeView = TextView(this).apply {
+            textSize = 28f; setTextColor(0xFF5AC47A.toInt()); gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); text = menge.toString()
+        }
+        val mMinus = Button(this).apply {
+            text = "−"; textSize = 22f; layoutParams = LinearLayout.LayoutParams(dpx(60), dpx(56))
+            setOnClickListener { menge = (menge - 1).coerceAtLeast(1); mengeView.text = menge.toString() }
+        }
+        val mPlus = Button(this).apply {
+            text = "+"; textSize = 22f; layoutParams = LinearLayout.LayoutParams(dpx(60), dpx(56))
+            setOnClickListener { menge += 1; mengeView.text = menge.toString() }
+        }
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(mMinus); addView(mengeView); addView(mPlus)
+        })
+
+        AlertDialog.Builder(this)
+            .setTitle("Lieferung bearbeiten")
+            .setView(ScrollView(this).apply { addView(root) })
+            .setPositiveButton("Speichern") { _, _ ->
+                val s = (if (Store.sorten.isEmpty()) sorteEdit.text.toString().trim() else sorte).ifBlank { l.sorte }
+                Store.updateLieferung(l.id, s, einheit, menge)
+                if (Sync.configured) autoSync()
+                toast("Gespeichert"); onChanged()
+            }
+            .setNeutralButton("Löschen") { _, _ ->
                 AlertDialog.Builder(this)
                     .setTitle("Lieferung löschen")
-                    .setMessage("${tf.format(Date(l.ts))} · ${l.sorte} · ${l.menge} $e löschen?")
+                    .setMessage("${l.sorte} · ${l.menge} ${if (l.einheit == "wag") "Lesewägen" else "Boxen"} löschen?")
                     .setPositiveButton("Löschen") { _, _ ->
-                        Store.deleteLieferung(l.id); if (Sync.configured) autoSync(); toast("Lieferung gelöscht")
+                        Store.deleteLieferung(l.id); if (Sync.configured) autoSync(); toast("Gelöscht"); onChanged()
                     }
                     .setNegativeButton("Abbrechen", null).show()
             }
-            .setPositiveButton("Schließen", null)
+            .setNegativeButton("Abbrechen", null)
             .show()
     }
 
@@ -1792,15 +1879,7 @@ class MainActivity : AppCompatActivity() {
                 listBox.addView(TextView(this).apply {
                     text = "${tf.format(Date(l.ts))}  ·  ${l.sorte}  ·  ${l.menge} $eLabel"
                     setTextColor(0xFFE8E8E8.toInt()); textSize = 14f; setPadding(0, dpx(6), 0, dpx(6))
-                    setOnLongClickListener {
-                        AlertDialog.Builder(this@MainActivity).setTitle("Lieferung löschen")
-                            .setMessage("${l.sorte} · ${l.menge} $eLabel wirklich löschen?")
-                            .setPositiveButton("Löschen") { _, _ ->
-                                Store.deleteLieferung(l.id); if (Sync.configured) autoSync(); refreshList()
-                            }
-                            .setNegativeButton("Abbrechen", null).show()
-                        true
-                    }
+                    setOnClickListener { lieferEditDialog(l) { refreshList() } }
                 })
             }
         }
