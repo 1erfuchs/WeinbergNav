@@ -9,7 +9,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # feste Version: "ubuntu-latest" wechselt ab 19.10.2026 auf Ubuntu 26
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -19,8 +20,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK einrichten
-        uses: android-actions/setup-android@v3
+      # Das Android SDK ist auf dem GitHub-Rechner bereits installiert
+      # (ANDROID_HOME). Der frühere Hilfsschritt "android-actions/setup-android"
+      # schlägt seit Oktober 2026 fehl und wird nicht mehr gebraucht.
+      - name: Android SDK prüfen
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Gradle einrichten
         uses: gradle/actions/setup-gradle@v4
