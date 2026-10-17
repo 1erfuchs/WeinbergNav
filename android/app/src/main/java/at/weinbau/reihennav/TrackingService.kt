@@ -93,7 +93,7 @@ class TrackingService : Service() {
         markedInProgress.clear(); markedDone.clear(); lastCovSynced.clear()
         fieldEnterAt = 0L; lastCoverage = 0.0
 
-        startForeground(NOTIF_ID, buildNotification("Aufzeichnung laeuft", task.ifBlank { "Suche Standort …" }))
+        startForeground(NOTIF_ID, buildNotification("Aufzeichnung läuft", task.ifBlank { "Suche Standort …" }))
 
         wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "reihennav:track")
@@ -101,9 +101,11 @@ class TrackingService : Service() {
 
         // Externer Empfaenger, falls eingerichtet - sonst Handy-GPS
         if (Store.btMac.isNotBlank()) {
-            sourceText = Store.btName.ifBlank { "Externer Empfaenger" }
-            val b = BtNmea(Store.btMac, { fix -> onNmea(fix) }, { st ->
-                lastQuality = st; notifyUi(); updateNotification()
+            sourceText = Store.btName.ifBlank { "Externer Empfänger" }
+            // Positionen kommen auf dem Bluetooth-Thread an -> auf den Hauptthread
+            // weiterreichen, damit Spur und Aufgaben nur an EINER Stelle geändert werden.
+            val b = BtNmea(Store.btMac, { fix -> svcUi.post { onNmea(fix) } }, { st ->
+                svcUi.post { lastQuality = st; notifyUi(); updateNotification() }
             })
             bt = b
             b.start()
@@ -113,7 +115,7 @@ class TrackingService : Service() {
                     Store.ntripUser, Store.ntripPass,
                     ggaProvider = { b.lastGga },
                     onRtcm = { data, n -> b.writeRtcm(data, n) },
-                    onState = { st -> lastQuality = st; notifyUi() }
+                    onState = { st -> svcUi.post { lastQuality = st; notifyUi() } }
                 ).also { it.start() }
             }
         } else {
@@ -346,11 +348,11 @@ class TrackingService : Service() {
             String.format(Locale.GERMAN, " · %.0f%%", lastCoverage * 100) else ""
         val text = String.format(
             Locale.GERMAN, "%s · %.2f ha · %s%s",
-            currentField?.name ?: "ausserhalb", ha, lastQuality, cov
+            currentField?.name ?: "außerhalb", ha, lastQuality, cov
         )
         runCatching {
             (getSystemService(NotificationManager::class.java))
-                .notify(NOTIF_ID, buildNotification("Aufzeichnung laeuft", text))
+                .notify(NOTIF_ID, buildNotification("Aufzeichnung läuft", text))
         }
     }
 

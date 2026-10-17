@@ -66,12 +66,14 @@ object PhotoUpload {
             if (!file.exists()) { done.add(mid to path); continue }  // Datei weg -> aus Queue
             val name = uploadFile(base, token, file)
             if (name != null) {
-                // Dateiname der Meldung hinzufügen
-                val m = Store.meldungen.firstOrNull { it.id == mid }
-                if (m != null && !m.fotos.contains(name)) {
-                    m.fotos.add(name)
-                    m.updatedAt = System.currentTimeMillis()
-                    Store.saveMeldungen()
+                // Dateiname der Meldung hinzufügen (auf dem Hauptthread, wie alle Datenänderungen)
+                Store.onMain {
+                    val m = Store.meldungen.firstOrNull { it.id == mid }
+                    if (m != null && !m.fotos.contains(name)) {
+                        m.fotos.add(name)
+                        m.updatedAt = System.currentTimeMillis()
+                        Store.saveMeldungen()
+                    }
                 }
                 runCatching { file.delete() }
                 done.add(mid to path)

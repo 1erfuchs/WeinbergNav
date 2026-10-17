@@ -20,6 +20,30 @@ import kotlin.math.PI
 
 data class Pt(val lat: Double, val lng: Double)
 
+/**
+ * Unbekannte Schlüssel eines Datensatzes aufbewahren (z. B. Werte, die nur im
+ * Web gepflegt werden). Ohne das würden sie beim nächsten Hochladen vom Handy
+ * verloren gehen, weil die App den Datensatz komplett neu schreibt.
+ */
+internal fun extrasOf(o: JSONObject, known: Set<String>): JSONObject? {
+    var x: JSONObject? = null
+    val it = o.keys()
+    while (it.hasNext()) {
+        val k = it.next()
+        if (k in known || k == "_srv") continue
+        if (x == null) x = JSONObject()
+        x.put(k, o.get(k))
+    }
+    return x
+}
+
+internal fun JSONObject.putExtras(x: JSONObject?): JSONObject {
+    if (x == null) return this
+    val it = x.keys()
+    while (it.hasNext()) { val k = it.next(); if (!has(k)) put(k, x.get(k)) }
+    return this
+}
+
 data class Field(
     var id: String,
     var name: String,
@@ -28,16 +52,20 @@ data class Field(
     var bezirk: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
     var user: String = "",
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var feldnr: String = "",                 // Feldstücks-/Schlagnummer (im Web gepflegt)
+    var extra: JSONObject? = null            // sonstige Web-Werte, unverändert mitgeführt
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("ha", ha); put("bezirk", bezirk)
+        put("feldnr", feldnr)
         put("updatedAt", updatedAt); put("user", user); put("deleted", deleted)
         put("coords", JSONArray().also { arr ->
             coords.forEach { p -> arr.put(JSONArray().put(p.lat).put(p.lng)) }
         })
-    }
+    }.putExtras(extra)
     companion object {
+        private val KNOWN = setOf("id", "name", "ha", "bezirk", "feldnr", "updatedAt", "user", "deleted", "coords")
         fun fromJson(o: JSONObject): Field {
             val cs = mutableListOf<Pt>()
             val a = o.optJSONArray("coords") ?: JSONArray()
@@ -53,7 +81,9 @@ data class Field(
                 bezirk = o.optString("bezirk", ""),
                 updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
                 user = o.optString("user", ""),
-                deleted = o.optBoolean("deleted", false)
+                deleted = o.optBoolean("deleted", false),
+                feldnr = o.optString("feldnr", ""),
+                extra = extrasOf(o, KNOWN)
             )
         }
     }
@@ -72,7 +102,8 @@ data class Session(
     var track: MutableList<Pt> = mutableListOf(),
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var extra: JSONObject? = null
 ) {
     val ha: Double get() = distM * widthM / 10000.0
 
@@ -85,8 +116,10 @@ data class Session(
         put("track", JSONArray().also { arr ->
             track.forEach { p -> arr.put(JSONArray().put(p.lat).put(p.lng)) }
         })
-    }
+    }.putExtras(extra)
     companion object {
+        private val KNOWN = setOf("id", "startedAt", "endedAt", "fieldId", "fieldName", "task", "taskId",
+            "widthM", "distM", "track", "user", "updatedAt", "deleted")
         fun fromJson(o: JSONObject): Session {
             val ts = mutableListOf<Pt>()
             val a = o.optJSONArray("track") ?: JSONArray()
@@ -107,7 +140,8 @@ data class Session(
                 track = ts,
                 user = o.optString("user", ""),
                 updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-                deleted = o.optBoolean("deleted", false)
+                deleted = o.optBoolean("deleted", false),
+                extra = extrasOf(o, KNOWN)
             )
         }
     }
@@ -128,15 +162,17 @@ data class Note(
     var createdAt: Long = System.currentTimeMillis(),
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var extra: JSONObject? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("lat", lat); put("lng", lng)
         put("fieldId", fieldId ?: JSONObject.NULL)
         put("kind", kind); put("text", text); put("createdAt", createdAt)
         put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
-    }
+    }.putExtras(extra)
     companion object {
+        private val KNOWN = setOf("id", "lat", "lng", "fieldId", "kind", "text", "createdAt", "user", "updatedAt", "deleted")
         val KINDS = listOf(
             "Stockputzen", "Laub einstricken", "Ausbrechen", "Heften",
             "Schaden", "Hindernis", "Anmerkung"
@@ -151,7 +187,8 @@ data class Note(
             createdAt = o.optLong("createdAt", 0),
             user = o.optString("user", ""),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-            deleted = o.optBoolean("deleted", false)
+            deleted = o.optBoolean("deleted", false),
+            extra = extrasOf(o, KNOWN)
         )
     }
 }
@@ -172,7 +209,8 @@ data class Meldung(
     var createdAt: Long = System.currentTimeMillis(),
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var extra: JSONObject? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("lat", lat); put("lng", lng)
@@ -181,8 +219,10 @@ data class Meldung(
         put("createdAt", createdAt); put("user", user)
         put("updatedAt", updatedAt); put("deleted", deleted)
         put("fotos", JSONArray().also { a -> fotos.forEach { a.put(it) } })
-    }
+    }.putExtras(extra)
     companion object {
+        private val KNOWN = setOf("id", "lat", "lng", "fieldId", "art", "text", "status", "createdAt",
+            "user", "updatedAt", "deleted", "fotos")
         val ARTEN = listOf(
             "Wildschaden", "Hagelschaden", "Sturmschaden", "Pfosten-Schaden",
             "Zaun-Schaden", "Maschinen-Schaden", "Krankheit", "Sonstiger Schaden"
@@ -203,7 +243,8 @@ data class Meldung(
                 createdAt = o.optLong("createdAt", 0),
                 user = o.optString("user", ""),
                 updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-                deleted = o.optBoolean("deleted", false)
+                deleted = o.optBoolean("deleted", false),
+                extra = extrasOf(o, KNOWN)
             )
         }
     }
@@ -228,7 +269,8 @@ data class Task(
     var createdAt: Long = System.currentTimeMillis(),
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var extra: JSONObject? = null
 ) {
     /** betroffene Felder: leere Liste bedeutet "alle" */
     fun appliesTo(allFieldIds: List<String>): List<String> =
@@ -247,8 +289,33 @@ data class Task(
         put("done", JSONObject().also { d ->
             done.forEach { (fid, m) -> d.put(fid, JSONObject().put("state", m.state).put("at", m.at).put("by", m.by).put("since", m.since).put("cov", m.cov).put("drive", m.drive)) }
         })
+    }.putExtras(extra)
+
+    /**
+     * Fassung vom Server einmischen – Feld für Feld (gleiche Regel wie
+     * api/aufgabenmerge.php): Titel/Felder/Notiz/gelöscht von der neueren
+     * Fassung; je Feld gewinnt die jüngere Status-Änderung ("at"), bei
+     * gleichem Zeitpunkt der höhere Fortschritt. Ändert dieses Objekt direkt
+     * (offene Dialoge behalten so ihren Bezug). true = etwas hat sich geändert.
+     */
+    fun mergeFrom(inc: Task): Boolean {
+        val vorher = toJson().toString()
+        if (inc.updatedAt > updatedAt) {
+            title = inc.title; typ = inc.typ; fieldIds = inc.fieldIds.toMutableList(); note = inc.note
+            dueAt = inc.dueAt; createdBy = inc.createdBy; createdAt = inc.createdAt
+            user = inc.user; deleted = inc.deleted; extra = inc.extra
+        }
+        for ((fid, m) in inc.done) {
+            val mein = done[fid]
+            if (mein == null || m.at > mein.at || (m.at == mein.at && m.cov > mein.cov)) done[fid] = m
+        }
+        if (inc.updatedAt > updatedAt) updatedAt = inc.updatedAt
+        return toJson().toString() != vorher
     }
+
     companion object {
+        private val KNOWN = setOf("id", "title", "typ", "note", "dueAt", "createdBy", "createdAt",
+            "user", "updatedAt", "deleted", "fieldIds", "done")
         fun fromJson(o: JSONObject): Task {
             val fids = mutableListOf<String>()
             val fa = o.optJSONArray("fieldIds") ?: JSONArray()
@@ -259,7 +326,8 @@ data class Task(
                 val keys = d.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
-                    val mo = d.getJSONObject(k)
+                    // sehr altes Format (z. B. nur true) -> als "erledigt" werten statt abzustürzen
+                    val mo = d.optJSONObject(k) ?: JSONObject().put("state", "fertig")
                     // altes Format (nur at/by) -> state = fertig; since fällt auf at zurück
                     val at = mo.optLong("at", 0)
                     dm[k] = FieldMark(mo.optString("state", "fertig"), at, mo.optString("by", ""), mo.optLong("since", at), mo.optDouble("cov", 0.0), mo.optString("drive", ""))
@@ -277,7 +345,8 @@ data class Task(
                 createdAt = o.optLong("createdAt", 0),
                 user = o.optString("user", ""),
                 updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-                deleted = o.optBoolean("deleted", false)
+                deleted = o.optBoolean("deleted", false),
+                extra = extrasOf(o, KNOWN)
             )
         }
     }
@@ -285,7 +354,9 @@ data class Task(
 
 /**
  * Erledigungs-Vermerk eines Feldes in einer Aufgabe.
- *  state = "arbeit" | "fertig"
+ *  state = "arbeit" | "fertig" | "offen" (offen = bewusst zurückgesetzt; wird
+ *          als eigener Eintrag gespeichert, damit das Zurücksetzen beim
+ *          Zusammenführen mit anderen Geräten nicht verloren geht)
  *  at    = Zeitpunkt der letzten Statusänderung (arbeit=Beginn, fertig=Ende)
  *  since = Zeitpunkt, an dem das Feld erstmals auf "in Arbeit" ging.
  *          Bleibt beim Wechsel auf "fertig" erhalten, damit Start- UND
@@ -532,14 +603,17 @@ data class Lieferung(
     var notiz: String = "",
     var user: String = "",
     var updatedAt: Long = System.currentTimeMillis(),
-    var deleted: Boolean = false
+    var deleted: Boolean = false,
+    var extra: JSONObject? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("taskId", taskId); put("fieldId", fieldId)
         put("ts", ts); put("sorte", sorte); put("einheit", einheit); put("menge", menge)
         put("notiz", notiz); put("user", user); put("updatedAt", updatedAt); put("deleted", deleted)
-    }
+    }.putExtras(extra)
     companion object {
+        private val KNOWN = setOf("id", "taskId", "fieldId", "ts", "sorte", "einheit", "menge", "notiz",
+            "user", "updatedAt", "deleted")
         fun fromJson(o: JSONObject) = Lieferung(
             id = o.getString("id"),
             taskId = o.optString("taskId", ""),
@@ -551,7 +625,8 @@ data class Lieferung(
             notiz = o.optString("notiz", ""),
             user = o.optString("user", ""),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-            deleted = o.optBoolean("deleted", false)
+            deleted = o.optBoolean("deleted", false),
+            extra = extrasOf(o, KNOWN)
         )
     }
 }

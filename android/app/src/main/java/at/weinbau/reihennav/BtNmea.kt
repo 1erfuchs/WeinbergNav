@@ -45,7 +45,7 @@ class BtNmea(
         thread(name = "bt-nmea") {
             while (running) {
                 try {
-                    onState("Verbinde mit Empfaenger …")
+                    onState("Verbinde mit Empfänger …")
                     val adapter = BluetoothAdapter.getDefaultAdapter()
                         ?: throw IllegalStateException("Kein Bluetooth")
                     val dev: BluetoothDevice = adapter.getRemoteDevice(mac)
@@ -54,7 +54,7 @@ class BtNmea(
                     s.connect()
                     socket = s
                     out = s.outputStream
-                    onState("Empfaenger verbunden")
+                    onState("Empfänger verbunden")
 
                     val r = BufferedReader(InputStreamReader(s.inputStream, Charsets.US_ASCII), 4096)
                     while (running) {
@@ -63,14 +63,14 @@ class BtNmea(
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "BT: ${e.message}")
-                    onState("Empfaenger getrennt – neuer Versuch …")
+                    onState("Empfänger getrennt – neuer Versuch …")
                 } finally {
                     runCatching { socket?.close() }
                     socket = null; out = null
                 }
                 if (running) Thread.sleep(3000)   // Auto-Reconnect
             }
-            onState("Empfaenger aus")
+            onState("Empfänger aus")
         }
     }
 

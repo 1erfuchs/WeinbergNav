@@ -53,25 +53,31 @@ class MainActivity : AppCompatActivity() {
     private var follow = true
     private val ui = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** Automatischer Serverabgleich alle 5 Minuten, solange die App offen ist. */
+    /**
+     * Automatischer Abgleich alle 5 Minuten, solange die App offen ist.
+     * Während einer Fahrt gleicht der Aufzeichnungs-Dienst selbst ab (auch bei
+     * ausgeschaltetem Display) – hier werden dann nur die Positionen geholt.
+     */
     private val syncIntervalMs = 5 * 60 * 1000L
     private val syncTick = object : Runnable {
         override fun run() {
             if (Sync.configured) {
-                autoSync()
-                here()?.let { Sync.uploadPosition(it.lat, it.lng, TrackingService.lastAccM) }
+                if (!TrackingService.running) autoSync()
+                ladePositionen()
             }
             ui.postDelayed(this, syncIntervalMs)
         }
     }
 
-    /** Alle 5 Minuten automatisch synchronisieren, solange eine Fahrt/Arbeit läuft. */
-    private val periodicSync = object : Runnable {
-        override fun run() {
-            if (Sync.configured && TrackingService.running) autoSync()
-            ui.postDelayed(this, 5 * 60 * 1000L)
-        }
-    }
+    /** Positionen der anderen Nutzer (für die Karte) */
+    private data class Kollege(val user: String, val p: Pt, val ts: Long)
+    private var kollegen: List<Kollege> = emptyList()
+
+    /** Aufgabe, deren Feld-Status auf der Karte eingefärbt wird (null = keine).
+     *  Während einer Fahrt mit Aufgabe ist es automatisch diese Aufgabe. */
+    private var kartenAufgabeId: String? = null
+    private fun kartenAufgabe(): Task? =
+        Store.taskById(TrackingService.session?.taskId ?: kartenAufgabeId)?.takeIf { !it.deleted }
 
     private var boundaryMode = false
     private val boundaryPts = mutableListOf<Pt>()
@@ -133,15 +139,13 @@ class MainActivity : AppCompatActivity() {
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
 
-        ui.postDelayed(periodicSync, 5 * 60 * 1000L)   // 5-Minuten-Sync während der Arbeit
-
         b.map.setTileSource(esri)
         b.map.setMultiTouchControls(true)
         b.map.setUseDataConnection(true)
         b.map.controller.setZoom(16.0)
         b.map.controller.setCenter(GeoPoint(48.21, 16.37))
 
-        b.btnDrive.setOnClickListener { if (TrackingService.running) stopDrive() else askTask() }
+        b.btnDrive.setOnClickListener { if (TrackingService.running) stopDrive() else startDialog() }
         b.btnNote.setOnClickListener { noteMenu() }
         b.btnFields.setOnClickListener { fieldsDialog() }
         b.btnHist.setOnClickListener { historyDialog() }
@@ -152,6 +156,14 @@ class MainActivity : AppCompatActivity() {
             locateOnce()
         }
         b.map.setOnTouchListener { _, _ -> follow = false; false }
+        // Oben antippen: Status-Anzeige einer Aufgabe auf der Karte wieder ausblenden
+        b.topbar.setOnClickListener {
+            if (!TrackingService.running && kartenAufgabeId != null) {
+                kartenAufgabeId = null; drawStatic(); refresh(); toast("Status-Anzeige ausgeblendet")
+            }
+        }
+        // Jeder Abgleich, der etwas geändert hat (auch aus dem Hintergrund), zeichnet die Karte neu
+        Sync.onChanged = { drawStatic(); refresh() }
 
         fused = LocationServices.getFusedLocationProviderClient(this)
 
@@ -197,7 +209,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Aufzeichnung im Hintergrund")
             .setMessage(
-                "Damit die Fahrt auch bei ausgeschaltetem Display weiterlaeuft, " +
+                "Damit die Fahrt auch bei ausgeschaltetem Display weiterläuft, " +
                 "braucht die App die Standortfreigabe \"Immer zulassen\".\n\n" +
                 "Android zeigt das nur in den Einstellungen an."
             )
@@ -207,53 +219,101 @@ class MainActivity : AppCompatActivity() {
                     Uri.parse("package:$packageName")
                 ))
             }
-            .setNegativeButton("Spaeter", null)
+            .setNegativeButton("Später", null)
             .show()
     }
 
     // ---------- Fahrt ----------
-    private fun askTask() {
-        val tasks = arrayOf(
-            "Spritzen", "Laubschneiden", "Mulchen", "Ausbrechen", "Heften",
-            "Gipfeln", "Bodenbearbeitung", "Duengen", "Ernte", "Ohne Thema"
-        )
-        var pick = 0
-        val extra = EditText(this).apply {
-            hint = "Zusatz, z. B. 6. Durchgang"
-            setPadding(40, 20, 40, 20)
+    /** Überschrift in einer Liste */
+    private fun abschnitt(text: String): TextView = TextView(this).apply {
+        this.text = text; textSize = 13f; alpha = 0.7f
+        setTypeface(typeface, Typeface.BOLD)
+        setPadding(dpx(14), dpx(14), dpx(14), dpx(4))
+    }
+
+    /** Große, gut antippbare Listenzeile (Titel + kleine Zweitzeile) */
+    private fun listenZeile(titel: String, sub: String?, onClick: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(14), dpx(10), dpx(14), dpx(10))
+            minimumHeight = dpx(52)
+            val tv = android.util.TypedValue()
+            context.theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
+            setBackgroundResource(tv.resourceId)
+            isClickable = true
+            addView(TextView(context).apply { text = titel; textSize = 16f })
+            if (!sub.isNullOrBlank()) addView(TextView(context).apply { text = sub; textSize = 13f; alpha = 0.7f })
+            setOnClickListener { onClick() }
         }
-        AlertDialog.Builder(this)
-            .setTitle("Welche Arbeit?")
-            .setSingleChoiceItems(tasks, 0) { _, w -> pick = w }
-            .setView(extra)
-            .setPositiveButton("Weiter") { _, _ ->
-                val base = if (tasks[pick] == "Ohne Thema") "" else tasks[pick]
-                val ex = extra.text.toString().trim()
-                val label = listOf(base, ex).filter { it.isNotBlank() }.joinToString(" · ")
-                chooseTaskThenStart(label)
+
+    /** Lese-/Ernte-Aufgabe? (Typ, bei alten Aufgaben ohne Typ auch der Titel) */
+    private fun istLese(t: Task) =
+        t.typ.contains("Lese", true) || t.typ.contains("Ernte", true) ||
+        (t.typ.isBlank() && (t.title.contains("Lese", true) || t.title.contains("Ernte", true)))
+
+    /**
+     * Fahrt starten in EINEM Schritt: offene Aufgaben gleich zur Auswahl
+     * (Aufgaben im Feld, in dem man gerade steht, zuerst). Ein Tipp = los.
+     * Darunter "Freie Arbeit" für Fahrten ohne Aufgabe.
+     */
+    private fun startDialog() {
+        val allIds = Store.activeFields().map { it.id }
+        val hierFeld = here()?.let { Store.fieldAt(it) }
+        fun hierOffen(t: Task) = hierFeld != null && hierFeld.id in t.appliesTo(allIds) && t.stateOf(hierFeld.id) != "fertig"
+        val offene = Store.activeTasks()
+            .filter { t -> t.appliesTo(allIds).any { t.stateOf(it) != "fertig" } }
+            .sortedWith(compareBy<Task>({ if (hierOffen(it)) 0 else 1 },
+                { it.dueAt.takeIf { d -> d > 0 } ?: Long.MAX_VALUE },
+                { -it.createdAt }))
+        if (offene.isEmpty()) { freieArbeitDialog(); return }
+
+        val df = SimpleDateFormat("dd.MM.", Locale.GERMAN)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(6), 0, dpx(6), dpx(6)) }
+        var dlg: AlertDialog? = null
+        box.addView(abschnitt("Offene Aufgaben – antippen und losfahren"))
+        for (t in offene) {
+            val ids = t.appliesTo(allIds)
+            val fertig = ids.count { t.stateOf(it) == "fertig" }
+            val arbeit = ids.count { t.stateOf(it) == "arbeit" }
+            val sub = buildString {
+                append("$fertig/${ids.size} erledigt")
+                if (arbeit > 0) append(" · $arbeit in Arbeit")
+                if (t.dueAt > 0) append(" · bis ${df.format(Date(t.dueAt))}")
+                if (hierOffen(t)) append(" · 📍 hier offen")
             }
+            val typ = if (t.typ.isNotBlank() && !t.title.contains(t.typ, true)) "  (${t.typ})" else ""
+            box.addView(listenZeile("▶  ${t.title}$typ", sub) { dlg?.dismiss(); startDriveForTask(t) })
+        }
+        box.addView(abschnitt("Ohne Aufgabe"))
+        box.addView(listenZeile("Freie Arbeit …", "Art der Arbeit wählen – es wird nichts abgehakt") {
+            dlg?.dismiss(); freieArbeitDialog()
+        })
+        dlg = AlertDialog.Builder(this)
+            .setTitle("Fahrt starten")
+            .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Abbrechen", null)
             .show()
     }
 
-    /** Optional eine offene Aufgabe an die Fahrt koppeln (automatisches Abhaken) */
-    private fun chooseTaskThenStart(label: String) {
-        val allIds = Store.activeFields().map { it.id }
-        val offene = Store.activeTasks().filter { t ->
-            t.appliesTo(allIds).any { t.stateOf(it) != "fertig" }
-        }
-        if (offene.isEmpty()) { startDrive(label, null); return }
-        val namen = arrayOf("Keine Aufgabe koppeln") +
-            offene.map { it.title + (if (it.typ.isNotBlank()) " (${it.typ})" else "") }.toTypedArray()
+    /** Fahrt ohne Aufgabe: nur die Art der Arbeit festhalten */
+    private fun freieArbeitDialog() {
+        val arten = (Store.aufgabenTypen().filter { !it.equals("Sonstiges", true) } + "Ohne Thema").toTypedArray()
         var pick = 0
+        val extra = EditText(this).apply {
+            hint = "Zusatz, z. B. Mulchen · 6. Durchgang"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setPadding(dpx(20), dpx(10), dpx(20), dpx(10))
+        }
         AlertDialog.Builder(this)
-            .setTitle("Aufgabe koppeln?")
-            .setSingleChoiceItems(namen, 0) { _, w -> pick = w }
+            .setTitle("Welche Arbeit?")
+            .setSingleChoiceItems(arten, 0) { _, w -> pick = w }
+            .setView(extra)
             .setPositiveButton("Fahrt starten") { _, _ ->
-                val taskId = if (pick == 0) null else offene[pick - 1].id
-                startDrive(label, taskId)
+                val base = if (arten[pick] == "Ohne Thema") "" else arten[pick]
+                val ex = extra.text.toString().trim()
+                startDrive(listOf(base, ex).filter { it.isNotBlank() }.joinToString(" · "), null)
             }
-            .setNegativeButton("Zurück", null)
+            .setNegativeButton("Abbrechen", null)
             .show()
     }
 
@@ -455,7 +515,7 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Keine Position")
                 .setMessage(
                     "Es liegt noch keine GPS-Position vor. Tippe zuerst unten rechts auf ◎, " +
-                    "oder tippe lange auf die gewuenschte Stelle in der Karte, um dort eine " +
+                    "oder tippe lange auf die gewünschte Stelle in der Karte, um dort eine " +
                     "Notiz zu setzen."
                 )
                 .setPositiveButton("OK", null).show()
@@ -484,7 +544,7 @@ class MainActivity : AppCompatActivity() {
                     user = Store.user
                 )
                 Store.notes.add(n); Store.saveNotes()
-                drawStatic()
+                drawStatic(); syncSoon()
                 toast("Notiz gespeichert: ${n.kind}")
             }
             .setNegativeButton("Abbrechen", null)
@@ -508,7 +568,7 @@ class MainActivity : AppCompatActivity() {
         val uri = try {
             FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
         } catch (e: Exception) {
-            toast("Kamera nicht verfuegbar: ${e.message}"); return
+            toast("Kamera nicht verfügbar: ${e.message}"); return
         }
         try {
             takePhoto.launch(uri)
@@ -541,7 +601,7 @@ class MainActivity : AppCompatActivity() {
                     user = Store.user
                 )
                 Store.meldungen.add(m); Store.saveMeldungen()
-                drawStatic()
+                drawStatic(); syncSoon()
                 // Foto im Hintergrund hochladen (mit Offline-Warteschlange)
                 Thread {
                     runCatching { PhotoUpload.addAndUpload(m.id, photo.absolutePath) }
@@ -601,22 +661,38 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Felder ----------
     private fun fieldsDialog() {
-        val fs = Store.activeFields()
-        val names = fs.map { "${it.name}  ·  ${fmt(it.ha)} ha" }.toTypedArray()
-        AlertDialog.Builder(this)
+        val fs = Store.activeFields().sortedWith(compareBy({ it.bezirk.ifBlank { "zzz" } }, { it.name.lowercase() }))
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(6), 0, dpx(6), dpx(6)) }
+        var dlg: AlertDialog? = null
+        var bezirk: String? = null
+        for (f in fs) {
+            val bz = f.bezirk.ifBlank { "" }
+            if (bz != bezirk) {
+                bezirk = bz
+                box.addView(abschnitt(if (bz.isBlank()) "Ohne Bezirk" else "Bezirk $bz"))
+            }
+            val sub = listOfNotNull("${fmt(f.ha)} ha", f.feldnr.ifBlank { null }?.let { "Nr. $it" },
+                Store.openTasksFor(f.id).size.takeIf { it > 0 }?.let { "$it offene Aufgabe${if (it != 1) "n" else ""}" })
+                .joinToString(" · ")
+            box.addView(listenZeile(f.name, sub) { dlg?.dismiss(); fieldActions(f) })
+        }
+        if (fs.isEmpty()) box.addView(abschnitt("Noch keine Felder – „Grenze abfahren“ oder im Web zeichnen."))
+        dlg = AlertDialog.Builder(this)
             .setTitle("Felder (${fs.size})")
-            .setItems(names) { _, i -> fieldActions(fs[i]) }
+            .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Grenze abfahren") { _, _ -> startBoundary() }
-            .setNeutralButton("Schliessen", null)
+            .setNeutralButton("Schließen", null)
             .show()
     }
 
     private fun fieldActions(f: Field) {
-        val titel = f.name + if (f.bezirk.isNotBlank()) " · Bezirk ${f.bezirk}" else ""
+        val titel = f.name + (if (f.bezirk.isNotBlank()) " · Bezirk ${f.bezirk}" else "") +
+            (if (f.feldnr.isNotBlank()) " · Nr. ${f.feldnr}" else "")
         AlertDialog.Builder(this)
             .setTitle(titel)
-            .setItems(arrayOf("Auf Karte zeigen", "Umbenennen", "Bezirk festlegen", "Löschen")) { _, i ->
-                when (i) {
+            .setItems(arrayOf("Aufgaben & Lieferungen", "Auf Karte zeigen", "Umbenennen", "Bezirk festlegen", "Löschen")) { _, i0 ->
+                if (i0 == 0) { zoomTo(f); fieldTasksDialog(f); return@setItems }
+                when (i0 - 1) {
                     0 -> zoomTo(f)
                     1 -> {
                         val e = EditText(this).apply { setText(f.name); setPadding(40, 20, 40, 20) }
@@ -676,7 +752,7 @@ class MainActivity : AppCompatActivity() {
                     ha = Geo.areaHa(pts),
                     user = Store.user
                 )
-                Store.fields.add(f); Store.saveFields(); drawStatic(); zoomTo(f)
+                Store.fields.add(f); Store.saveFields(); drawStatic(); zoomTo(f); syncSoon()
             }
             .setNegativeButton("Verwerfen", null)
             .show()
@@ -688,20 +764,25 @@ class MainActivity : AppCompatActivity() {
         if (ss.isEmpty()) { toast("Noch keine Fahrten aufgezeichnet."); return }
         val df = SimpleDateFormat("EEEE, dd.MM.yyyy", Locale.GERMAN)
         val tf = SimpleDateFormat("HH:mm", Locale.GERMAN)
-        val lines = mutableListOf<String>()
-        val refs = mutableListOf<Session>()
-        var lastDay = ""
-        for (s in ss) {
-            val day = df.format(Date(s.startedAt))
-            if (day != lastDay) { lastDay = day }
-            val who = if (s.user.isNotBlank()) "  ·  ${s.user}" else ""
-            lines.add("$day  ${tf.format(Date(s.startedAt))}\n${s.fieldName} · ${s.task.ifBlank { "ohne Thema" }} · ${fmt(s.ha)} ha$who")
-            refs.add(s)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(6), 0, dpx(6), dpx(6)) }
+        var dlg: AlertDialog? = null
+        var n = 0
+        for ((tag, liste) in ss.take(300).groupBy { df.format(Date(it.startedAt)) }) {
+            val ha = liste.sumOf { it.ha }
+            box.addView(abschnitt("$tag  ·  ${liste.size} Fahrt${if (liste.size != 1) "en" else ""} · ${fmt(ha)} ha"))
+            for (s in liste) {
+                n++
+                val dauer = if (s.endedAt > s.startedAt) " · ${(s.endedAt - s.startedAt) / 60000} min" else ""
+                val who = if (s.user.isNotBlank()) " · ${s.user}" else ""
+                box.addView(listenZeile("${tf.format(Date(s.startedAt))}   ${s.fieldName}",
+                    "${s.task.ifBlank { "ohne Thema" }} · ${fmt(s.ha)} ha$dauer$who") { dlg?.dismiss(); sessionActions(s) })
+            }
         }
-        AlertDialog.Builder(this)
+        if (ss.size > n) box.addView(abschnitt("Ältere Fahrten siehe Webseite → Fahrten"))
+        dlg = AlertDialog.Builder(this)
             .setTitle("Historie")
-            .setItems(lines.toTypedArray()) { _, i -> sessionActions(refs[i]) }
-            .setPositiveButton("Schliessen", null)
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Schließen", null)
             .show()
     }
 
@@ -916,7 +997,7 @@ class MainActivity : AppCompatActivity() {
 
         val ticker = object : Runnable { override fun run() { refresh(); ui.postDelayed(this, 5 * 60 * 1000L) } }
         val dlg = AlertDialog.Builder(this)
-            .setTitle("Aktuelle Positionen")
+            .setTitle("Wer ist wo?")
             .setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Schließen", null)
             .setNeutralButton("Aktualisieren", null)
@@ -930,43 +1011,69 @@ class MainActivity : AppCompatActivity() {
         dlg.show()
     }
 
-    // ---------- Einstellungen ----------
+    // ---------- Mehr / Einstellungen ----------
+    private fun appVersion(): String = runCatching {
+        @Suppress("DEPRECATION")
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    }.getOrDefault("?")
+
+    /** "Mehr": oben die Arbeits-Funktionen, Technik unter "Einstellungen". */
     private fun settingsDialog() {
-        val konto = if (Sync.configured) "Server: angemeldet als ${Store.user}" else "Server & Konto: nicht verbunden"
-        val items = arrayOf(
-            "\uD83C\uDF24 Spritzfenster (wann & was)",
-            "\uD83D\uDCE6 Lieferungen (Lieferbuch)",
-            "\uD83D\uDCCD Aktuelle Positionen",
-            "Aufgaben verwalten",
-            "Arbeitsbreite: ${fmt(Store.widthM)} m",
-            "Benutzer: ${Store.user}",
-            konto,
-            "Jetzt synchronisieren",
-            "GPS-Empfaenger: ${if (Store.btMac.isBlank()) "Handy-GPS" else Store.btName}",
-            "RTK-Korrekturdienst (NTRIP)",
-            "Daten exportieren",
-            "Daten importieren"
-        )
-        AlertDialog.Builder(this)
+        val allIds = Store.activeFields().map { it.id }
+        val offen = Store.activeTasks().count { t -> t.appliesTo(allIds).any { t.stateOf(it) != "fertig" } }
+        val nLief = Store.activeLieferungen().size
+        val tf = SimpleDateFormat("HH:mm", Locale.GERMAN)
+        val syncInfo = when {
+            !Sync.configured -> "kein Server verbunden"
+            Sync.lastOkAt > 0 -> "zuletzt um ${tf.format(Date(Sync.lastOkAt))}"
+            else -> "läuft automatisch alle 5 Minuten"
+        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(6), dpx(4), dpx(6), dpx(6)) }
+        var dlg: AlertDialog? = null
+        fun eintrag(t: String, sub: String?, a: () -> Unit) = box.addView(listenZeile(t, sub) { dlg?.dismiss(); a() })
+        eintrag("📋  Aufgaben", "$offen offen · neue Aufgabe anlegen") { tasksMenu() }
+        eintrag("📦  Lieferungen", if (nLief > 0) "$nLief erfasst · ansehen & bearbeiten" else "Lieferbuch der Lese") { lieferListeDialog() }
+        eintrag("📍  Wer ist wo?", "Positionen der anderen (auch auf der Karte)") { positionenDialog() }
+        eintrag("🌤  Spritzfenster", "wann & was spritzen") { spritzfensterDialog() }
+        eintrag("🔄  Jetzt synchronisieren", syncInfo) { syncNow() }
+        eintrag("⚙  Einstellungen", "Arbeitsbreite, Konto, GPS, Sicherung") { einstellungenDialog() }
+        dlg = AlertDialog.Builder(this)
+            .setTitle("Mehr")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun einstellungenDialog() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(6), dpx(4), dpx(6), dpx(6)) }
+        var dlg: AlertDialog? = null
+        fun eintrag(t: String, sub: String?, a: () -> Unit) = box.addView(listenZeile(t, sub) { dlg?.dismiss(); a() })
+        eintrag("Arbeitsbreite", "${fmt(Store.widthM)} m – mindestens der Reihenabstand") { widthDialog() }
+        if (Sync.configured) {
+            // Name kommt vom Server-Konto und ist hier nicht änderbar (sonst passen
+            // "erledigt von …" und die Positionen nicht mehr zusammen)
+            eintrag("Konto", "angemeldet als ${Store.user}") { serverDialog() }
+        } else {
+            eintrag("Server & Konto", "nicht verbunden – hier anmelden") { serverDialog() }
+            eintrag("Benutzername (ohne Server)", Store.user) {
+                textDialog("Benutzername", Store.user) { if (it.isNotBlank()) { Store.user = it; Store.savePrefs() } }
+            }
+        }
+        eintrag("GPS-Empfänger", if (Store.btMac.isBlank()) "Handy-GPS" else Store.btName) { btDialog() }
+        eintrag("RTK-Korrekturdienst (NTRIP)", if (Store.ntripHost.isBlank()) "nicht eingerichtet" else Store.ntripHost) { ntripDialog() }
+        eintrag("Daten exportieren", "Sicherung als Datei speichern") {
+            saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
+        }
+        eintrag("Daten importieren", "aus einer Sicherungsdatei ergänzen") { openFile.launch(arrayOf("application/json", "*/*")) }
+        box.addView(TextView(this).apply {
+            text = "App-Version ${appVersion()}"; textSize = 12f; alpha = 0.6f
+            setPadding(dpx(14), dpx(14), dpx(14), dpx(4))
+        })
+        dlg = AlertDialog.Builder(this)
             .setTitle("Einstellungen")
-            .setItems(items) { _, i ->
-                when (items[i]) {
-                    "\uD83C\uDF24 Spritzfenster (wann & was)" -> spritzfensterDialog()
-                    "\uD83D\uDCE6 Lieferungen (Lieferbuch)" -> lieferListeDialog()
-                    "\uD83D\uDCCD Aktuelle Positionen" -> positionenDialog()
-                    "Aufgaben verwalten" -> tasksMenu()
-                    "Benutzer: ${Store.user}" -> textDialog("Benutzername", Store.user) { Store.user = it; Store.savePrefs() }
-                    konto -> serverDialog()
-                    "Jetzt synchronisieren" -> syncNow()
-                    "RTK-Korrekturdienst (NTRIP)" -> ntripDialog()
-                    "Daten exportieren" -> saveFile.launch("reihen-navigator-${SimpleDateFormat("yyyy-MM-dd", Locale.GERMAN).format(Date())}.json")
-                    "Daten importieren" -> openFile.launch(arrayOf("application/json", "*/*"))
-                    else -> when {
-                        items[i].startsWith("Arbeitsbreite") -> widthDialog()
-                        items[i].startsWith("GPS-Empfaenger") -> btDialog()
-                    }
-                }
-            }.setPositiveButton("Schliessen", null).show()
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Zurück") { _, _ -> settingsDialog() }
+            .show()
     }
 
     // ---------- Spritzfenster (Entscheidungshilfe aus dem Server) ----------
@@ -1347,7 +1454,7 @@ class MainActivity : AppCompatActivity() {
                 .setMessage("Angemeldet als ${Store.user}\nServer: ${Store.serverUrl}")
                 .setPositiveButton("Jetzt synchronisieren") { _, _ -> syncNow() }
                 .setNeutralButton("Abmelden") { _, _ -> Sync.logout(); toast("Abgemeldet") }
-                .setNegativeButton("Schliessen", null).show()
+                .setNegativeButton("Schließen", null).show()
             return
         }
         val ll = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 20, 40, 10) }
@@ -1414,22 +1521,22 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun btDialog() {
         val ad = BluetoothAdapter.getDefaultAdapter()
-        if (ad == null) { toast("Dieses Geraet hat kein Bluetooth."); return }
+        if (ad == null) { toast("Dieses Gerät hat kein Bluetooth."); return }
         val bonded = try { ad.bondedDevices.toList() } catch (e: SecurityException) {
             toast("Bluetooth-Berechtigung fehlt."); return
         }
         if (bonded.isEmpty()) {
-            toast("Koppel den Empfaenger zuerst in den Android-Bluetooth-Einstellungen.")
+            toast("Koppel den Empfänger zuerst in den Android-Bluetooth-Einstellungen.")
             return
         }
         val names = (listOf("Handy-GPS verwenden") + bonded.map { "${it.name}  (${it.address})" }).toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("GPS-Empfaenger")
+            .setTitle("GPS-Empfänger")
             .setItems(names) { _, i ->
                 if (i == 0) { Store.btMac = ""; Store.btName = "" }
-                else { Store.btMac = bonded[i - 1].address; Store.btName = bonded[i - 1].name ?: "Empfaenger" }
+                else { Store.btMac = bonded[i - 1].address; Store.btName = bonded[i - 1].name ?: "Empfänger" }
                 Store.savePrefs()
-                toast(if (Store.btMac.isBlank()) "Handy-GPS aktiv" else "Empfaenger: ${Store.btName}")
+                toast(if (Store.btMac.isBlank()) "Handy-GPS aktiv" else "Empfänger: ${Store.btName}")
             }.show()
     }
 
@@ -1449,8 +1556,8 @@ class MainActivity : AppCompatActivity() {
         val pw = fld("Passwort", Store.ntripPass)
         val info = TextView(this).apply {
             text = "Zugangsdaten bekommst du vom Korrekturdienst " +
-                    "(in Oesterreich z. B. EPOSA oder APOS/BEV – kostenpflichtig). " +
-                    "Ohne diese Daten laeuft der Empfaenger ohne RTK."
+                    "(in Österreich z. B. EPOSA oder APOS/BEV – kostenpflichtig). " +
+                    "Ohne diese Daten läuft der Empfänger ohne RTK."
             textSize = 12f; setPadding(0, 20, 0, 0)
         }
         ll.addView(info)
@@ -1499,15 +1606,25 @@ class MainActivity : AppCompatActivity() {
         })
         b.map.overlays.add(events)
 
+        // Status einer Aufgabe einfärben: während einer Fahrt mit Aufgabe automatisch,
+        // sonst nur, wenn in der Aufgabe "Status auf der Karte zeigen" gewählt wurde.
+        val kt = kartenAufgabe()
+        val ktIds = kt?.appliesTo(Store.activeFields().map { it.id })?.toSet() ?: emptySet()
         for (f in Store.activeFields()) {
+            val st = if (kt != null && f.id in ktIds) kt.stateOf(f.id) else null
+            val fuell: Int; val linie: Int; val breite: Float
+            when {
+                kt == null -> { fuell = 0x1AE0B34A; linie = 0xFFE0B34A.toInt(); breite = 3f }
+                st == "fertig" -> { fuell = 0x555AC47A; linie = 0xFF5AC47A.toInt(); breite = 4f }
+                st == "arbeit" -> { fuell = 0x55E0B34A; linie = 0xFFE0B34A.toInt(); breite = 4f }
+                st != null -> { fuell = 0x2239D3E0; linie = 0xFF39D3E0.toInt(); breite = 3f }
+                else -> { fuell = 0x08FFFFFF; linie = 0x66FFFFFF; breite = 1.5f }   // gehört nicht zur Aufgabe
+            }
             val poly = Polygon(b.map).apply {
                 points = f.coords.map { GeoPoint(it.lat, it.lng) }
-                // Alle Felder einheitlich: die Farbe soll KEINEN Aufgabenstatus
-                // andeuten - es koennen mehrere Aufgaben gleichzeitig laufen,
-                // eine einzelne Farbe waere dann irrefuehrend.
-                fillPaint.color = 0x1AE0B34A
-                outlinePaint.color = 0xFFE0B34A.toInt()
-                outlinePaint.strokeWidth = 3f
+                fillPaint.color = fuell
+                outlinePaint.color = linie
+                outlinePaint.strokeWidth = breite
                 title = f.name
                 setOnClickListener { _, _, _ -> fieldTasksDialog(f); true }
             }
@@ -1517,10 +1634,15 @@ class MainActivity : AppCompatActivity() {
                 f.coords.sumOf { it.lat } / f.coords.size,
                 f.coords.sumOf { it.lng } / f.coords.size
             )
+            val symbol = when (st) {
+                "fertig" -> "☑ "; "arbeit" -> "◐ "; null -> ""; else -> "☐ "
+            }
+            // nur den gespeicherten Fortschritt nehmen (Neuberechnung wäre bei jedem GPS-Punkt zu teuer)
+            val pct = if (st == "arbeit") kt?.done?.get(f.id)?.cov?.takeIf { it > 0 }?.let { " ${(it * 100).roundToInt()}%" } ?: "" else ""
             val lbl = Marker(b.map).apply {
                 position = center
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                icon = labelIcon("${f.name} · ${fmt(f.ha)} ha", false)
+                icon = labelIcon("$symbol${f.name} · ${fmt(f.ha)} ha$pct", st == "arbeit")
                 setInfoWindow(null)
                 setOnMarkerClickListener { _, _ -> fieldTasksDialog(f); true }
             }
@@ -1543,7 +1665,7 @@ class MainActivity : AppCompatActivity() {
                         marker?.position?.let {
                             n.lat = it.latitude; n.lng = it.longitude
                             n.updatedAt = System.currentTimeMillis()
-                            Store.saveNotes()
+                            Store.saveNotes(); syncSoon()
                         }
                     }
                 })
@@ -1564,6 +1686,26 @@ class MainActivity : AppCompatActivity() {
             b.map.overlays.add(marker)
         }
 
+        // Andere Nutzer: roter Punkt mit Name (grau, wenn älter als 30 min)
+        for (k in kollegen) {
+            val min = ((System.currentTimeMillis() - k.ts) / 60000L).coerceAtLeast(0)
+            val alt = min > 30
+            val (ic, ankerX) = kollegeIcon("${k.user} · ${if (min < 60) "$min min" else "${min / 60} h"}", alt)
+            b.map.overlays.add(Marker(b.map).apply {
+                position = GeoPoint(k.p.lat, k.p.lng)
+                setAnchor(ankerX, Marker.ANCHOR_CENTER)
+                icon = ic
+                setInfoWindow(null)
+                setOnMarkerClickListener { _, _ ->
+                    val wo = riedeFor(k.p)?.let { "in Ried $it" } ?: "unterwegs"
+                    val dist = here()?.let { Geo.distM(it, k.p) }?.let {
+                        " · " + if (it < 1000) "${it.toInt()} m" else String.format(Locale.GERMAN, "%.1f km", it / 1000)
+                    } ?: ""
+                    toast("${k.user} · $wo$dist · ${minAgo(k.ts)}"); true
+                }
+            })
+        }
+
         // Eigene aktuelle Position als kleiner Punkt
         here()?.let { p ->
             val me = Marker(b.map).apply {
@@ -1577,6 +1719,44 @@ class MainActivity : AppCompatActivity() {
         }
 
         b.map.invalidate()
+    }
+
+    /** Punkt + Name für andere Nutzer; liefert auch die waagrechte Ankerposition (Punktmitte) */
+    private fun kollegeIcon(text: String, alt: Boolean): Pair<android.graphics.drawable.Drawable, Float> {
+        val d = resources.displayMetrics.density
+        val dot = 14f * d; val gap = 5f * d; val pad = 3f * d
+        val tp = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt(); textSize = 13f * d; typeface = Typeface.DEFAULT_BOLD
+            setShadowLayer(3f * d, 0f, 1f * d, 0xFF000000.toInt())
+        }
+        val fm = tp.fontMetrics
+        val h = maxOf(dot, fm.descent - fm.ascent) + pad * 2
+        val w = dot + gap + tp.measureText(text) + pad * 2
+        val bmp = android.graphics.Bitmap.createBitmap(w.toInt() + 1, h.toInt() + 1, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val cx = pad + dot / 2; val cy = h / 2
+        p.color = 0xFFFFFFFF.toInt(); c.drawCircle(cx, cy, dot / 2, p)
+        p.color = if (alt) 0xFF9AA0A6.toInt() else 0xFFE0625A.toInt(); c.drawCircle(cx, cy, dot / 2 - 2f * d, p)
+        c.drawText(text, pad + dot + gap, cy - (fm.ascent + fm.descent) / 2, tp)
+        return android.graphics.drawable.BitmapDrawable(resources, bmp) to (cx / bmp.width)
+    }
+
+    /** Positionen der anderen holen (meldet dabei die eigene) und auf der Karte zeigen */
+    private fun ladePositionen() {
+        if (!Sync.configured) return
+        val mine = here()
+        Thread {
+            val arr = Sync.fetchPositions(mine?.lat, mine?.lng, TrackingService.lastAccM) ?: return@Thread
+            val list = ArrayList<Kollege>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val u = o.optString("user")
+                if (u.isBlank() || u == Store.user) continue
+                list.add(Kollege(u, Pt(o.optDouble("lat"), o.optDouble("lng")), o.optLong("ts")))
+            }
+            runOnUiThread { kollegen = list; drawStatic(); TrackingService.session?.let { drawTrack(it.track, it.widthM) } }
+        }.start()
     }
 
     /** kleiner goldener Positionspunkt */
@@ -1645,131 +1825,33 @@ class MainActivity : AppCompatActivity() {
                     "◐  ${t.title}   (in Arbeit seit ${SimpleDateFormat("dd.MM. HH:mm", Locale.GERMAN).format(Date(seit))}$pct)"
                 }
                 else -> "☐  ${t.title}${if (t.dueAt > 0) "   bis ${SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(t.dueAt))}" else ""}"
-            }
+            } + (if (istLese(t)) lieferSumme(Store.lieferungenFor(t.id, f.id))?.let { "\n      📦 $it" } ?: "" else "")
         }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("${f.name} – Aufgaben")
             .setItems(labels) { _, i ->
                 val t = tasks[i]
-                if (t.typ.contains("Lese", true) || t.typ.contains("Ernte", true)) lieferDialog(t, f)
-                else statusDialog(t, f)
+                if (istLese(t)) lieferDialog(t, f) else statusDialog(t, f)
             }
             .setPositiveButton("Neue Aufgabe") { _, _ -> newTaskDialog(preselect = f.id) }
             .setNegativeButton("Schließen", null)
             .show()
     }
 
-    /** Status durchschalten: offen -> in Arbeit -> erledigt -> offen */
-    private fun cycleTaskState(t: Task, f: Field) {
-        val next = when (t.stateOf(f.id)) {
-            "offen" -> "arbeit"
-            "arbeit" -> "fertig"
-            else -> "offen"
-        }
-        val now = System.currentTimeMillis()
-        if (next == "offen") t.done.remove(f.id)
-        else {
-            // Arbeitsbeginn (since) erhalten: beim Start = jetzt, beim Erledigen der bisherige Wert
-            val since = if (next == "arbeit") now else (t.done[f.id]?.since?.takeIf { it > 0 } ?: now)
-            t.done[f.id] = FieldMark(next, now, Store.user, since)
-        }
-        t.updatedAt = now
-        Store.saveTasks(); if (Sync.configured) autoSync(); drawStatic()
-        val wort = when (next) { "arbeit" -> "in Arbeit"; "fertig" -> "erledigt"; else -> "offen" }
-        toast("\"${t.title}\" für ${f.name}: $wort")
-    }
-
-    /** Lese-Zählung für ein Feld: Boxen (Bez. 23) / Lesewägen (Bez. 21), mit Aufgaben-Summe. */
-    private fun ernteDialog(t: Task, f: Field) {
-        val units = when (f.bezirk.trim()) {
-            "23" -> listOf("box"); "21" -> listOf("wag"); else -> listOf("box", "wag")
-        }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dpx(20), dpx(10), dpx(20), dpx(6))
-        }
-        val totalView = TextView(this).apply {
-            textSize = 14f; setTextColor(0xFFCDD2D6.toInt()); setPadding(0, dpx(14), 0, dpx(4))
-        }
-        fun taskTotals(): Pair<Int, Int> {
-            var b = 0; var w = 0
-            for (e in Store.activeErnte()) if (e.taskId == t.id) { b += e.boxen; w += e.waegen }
-            return b to w
-        }
-        fun refreshTotals() {
-            val (b, w) = taskTotals()
-            totalView.text = "Aufgabe gesamt:  $b Boxen · $w Lesewägen"
-        }
-        for (u in units) {
-            val istBox = u == "box"
-            root.addView(TextView(this).apply {
-                text = if (istBox) "Boxen" else "Lesewägen"
-                textSize = 16f; setTextColor(0xFFF0F0F0.toInt()); setPadding(0, dpx(12), 0, dpx(4))
-            })
-            val num = TextView(this).apply {
-                textSize = 32f; setTextColor(0xFF5AC47A.toInt())
-                gravity = android.view.Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            fun readVal(): Int = Store.ernteFor(t.id, f.id)?.let { if (istBox) it.boxen else it.waegen } ?: 0
-            num.text = readVal().toString()
-            fun apply(newVal: Int) {
-                val e = Store.ernteFor(t.id, f.id)
-                val b = if (istBox) newVal else (e?.boxen ?: 0)
-                val w = if (!istBox) newVal else (e?.waegen ?: 0)
-                Store.setErnte(t.id, f.id, b, w)
-                num.text = readVal().toString(); refreshTotals()
-                if (Sync.configured) autoSync()
-            }
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-            }
-            val minus = Button(this).apply {
-                text = "−"; textSize = 24f
-                layoutParams = LinearLayout.LayoutParams(dpx(64), dpx(60))
-                setOnClickListener { apply((readVal() - 1).coerceAtLeast(0)) }
-            }
-            val plus = Button(this).apply {
-                text = "+"; textSize = 24f
-                layoutParams = LinearLayout.LayoutParams(dpx(64), dpx(60))
-                setOnClickListener { apply(readVal() + 1) }
-            }
-            row.addView(minus); row.addView(num); row.addView(plus)
-            root.addView(row)
-            val setRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(0, dpx(4), 0, 0)
-            }
-            val edit = EditText(this).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER
-                hint = "Zahl direkt setzen"
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val ok = Button(this).apply {
-                text = "setzen"
-                setOnClickListener {
-                    edit.text.toString().toIntOrNull()?.let { apply(it.coerceAtLeast(0)); edit.setText("") }
-                }
-            }
-            setRow.addView(edit); setRow.addView(ok)
-            root.addView(setRow)
-        }
-        root.addView(totalView)
-        refreshTotals()
-        AlertDialog.Builder(this)
-            .setTitle("Lese – ${f.name}")
-            .setView(ScrollView(this).apply { addView(root) })
-            .setPositiveButton("Fertig", null)
-            .setNeutralButton("Status ▸") { _, _ -> cycleTaskState(t, f) }
-            .show()
+    /** "12 Boxen + 2 Lesewägen" (null, wenn nichts) */
+    private fun lieferSumme(ls: List<Lieferung>): String? {
+        var sb = 0; var sw = 0
+        for (l in ls) { if (l.einheit == "wag") sw += l.menge else sb += l.menge }
+        val teile = listOfNotNull(sb.takeIf { it > 0 }?.let { "$it Boxen" }, sw.takeIf { it > 0 }?.let { "$it Lesewägen" })
+        return if (teile.isEmpty()) null else teile.joinToString(" + ")
     }
 
     /** Feld-Status direkt setzen (offen / in Arbeit / erledigt). */
     private fun setFieldState(t: Task, f: Field, state: String) {
         val now = System.currentTimeMillis()
-        if (state == "offen") t.done.remove(f.id)
+        // "offen" als eigener Eintrag (statt löschen): so gewinnt das Zurücksetzen
+        // auch beim Zusammenführen mit den anderen Geräten
+        if (state == "offen") t.done[f.id] = FieldMark("offen", now, Store.user, since = 0L, cov = 0.0)
         else {
             val since = if (state == "arbeit") now else (t.done[f.id]?.since?.takeIf { it > 0 } ?: now)
             val cov = if (state == "fertig") 1.0 else (t.done[f.id]?.cov ?: 0.0)
@@ -1800,9 +1882,18 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dpx(20), dpx(10), dpx(20), dpx(6))
         }
-        var sorte = Store.sorten.firstOrNull() ?: ""
-        var einheit = "box"
+        // Vorbelegung: wie die letzte Lieferung an diesem Feld; sonst Einheit nach
+        // Bezirk (21 = Lesewägen, 23 = Boxen) bzw. wie zuletzt von dir erfasst
+        val letzteHier = Store.letzteLieferungAm(f.id)
+        val letzteMeine = Store.letzteLieferungVon(Store.user)
+        var sorte = letzteHier?.sorte?.takeIf { it.isNotBlank() } ?: Store.sorten.singleOrNull() ?: ""
+        var einheit = letzteHier?.einheit ?: when (f.bezirk.trim()) {
+            "21" -> "wag"; "23" -> "box"; else -> letzteMeine?.einheit ?: "box"
+        }
         var menge = 1
+        if (letzteHier != null) root.addView(TextView(this).apply {
+            text = "Vorbelegt wie die letzte Lieferung hier"; textSize = 12f; alpha = 0.6f
+        })
 
         // Sorte
         root.addView(TextView(this).apply {
@@ -1935,38 +2026,64 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun newTaskDialog(preselect: String? = null) {
-        val fields = Store.activeFields()
-        val ll = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 16, 40, 8) }
+        val fields = Store.activeFields().sortedWith(compareBy({ it.bezirk.ifBlank { "zzz" } }, { it.name.lowercase() }))
+        val typen = Store.aufgabenTypen()
+        var typ = ""
+        val ll = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpx(20), dpx(8), dpx(20), dpx(4)) }
+        ll.addView(TextView(this).apply { text = "Art der Arbeit"; textSize = 13f; alpha = 0.7f })
+        val typBtn = Button(this).apply { text = "Art wählen …"; setAllCaps(false) }
+        typBtn.setOnClickListener {
+            AlertDialog.Builder(this).setTitle("Art der Arbeit")
+                .setItems(typen.toTypedArray()) { _, i -> typ = typen[i]; typBtn.text = typ }
+                .show()
+        }
+        ll.addView(typBtn)
         val title = EditText(this).apply {
-            hint = "Was ist zu tun? z. B. Laubschneiden"
+            hint = "Titel (leer = Art), z. B. Lese 2026"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         }
         ll.addView(title)
-        val hint = TextView(this).apply {
+        ll.addView(TextView(this).apply {
             text = "Für welche Felder? Nichts auswählen = alle Felder."
-            textSize = 12f; setPadding(0, 16, 0, 6)
-        }
-        ll.addView(hint)
+            textSize = 13f; alpha = 0.7f; setPadding(0, dpx(12), 0, dpx(4))
+        })
         val checks = fields.map { f ->
             CheckBox(this).apply {
-                text = "${f.name} · ${fmt(f.ha)} ha"
+                text = "${f.name} · ${fmt(f.ha)} ha" + if (f.bezirk.isNotBlank()) " · Bez. ${f.bezirk}" else ""
                 isChecked = (preselect != null && f.id == preselect)
-            }.also { ll.addView(it) }
+            }
         }
+        // Schnellauswahl: alle Felder eines Bezirks auf einmal
+        val bezirke = fields.map { it.bezirk.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
+        if (bezirke.isNotEmpty()) {
+            val reihe = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (bz in bezirke) reihe.addView(Button(this).apply {
+                text = "Bez. $bz"; setAllCaps(false)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { fields.forEachIndexed { i, f -> checks[i].isChecked = f.bezirk.trim() == bz } }
+            })
+            reihe.addView(Button(this).apply {
+                text = "keine"; setAllCaps(false)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { checks.forEach { it.isChecked = false } }
+            })
+            ll.addView(reihe)
+        }
+        checks.forEach { ll.addView(it) }
         AlertDialog.Builder(this)
             .setTitle("Neue Aufgabe")
             .setView(ScrollView(this).apply { addView(ll) })
             .setPositiveButton("Anlegen") { _, _ ->
-                val ti = title.text.toString().trim()
-                if (ti.isBlank()) { toast("Bitte einen Titel eingeben"); return@setPositiveButton }
+                val ti = title.text.toString().trim().ifBlank { typ }
+                if (ti.isBlank()) { toast("Bitte die Art der Arbeit wählen oder einen Titel eingeben"); return@setPositiveButton }
                 val chosen = fields.filterIndexed { idx, _ -> checks[idx].isChecked }.map { it.id }.toMutableList()
                 val task = Task(
-                    id = Store.newId("t"), title = ti,
+                    id = Store.newId("t"), title = ti, typ = typ,
                     fieldIds = chosen,             // leer = alle
                     createdBy = Store.user, user = Store.user
                 )
                 Store.tasks.add(task); Store.saveTasks()
-                if (Sync.configured) autoSync()
+                syncSoon()
                 drawStatic()
                 val n = if (chosen.isEmpty()) fields.size else chosen.size
                 toast("Aufgabe \"$ti\" für $n Feld${if (n != 1) "er" else ""} angelegt")
@@ -2004,6 +2121,10 @@ class MainActivity : AppCompatActivity() {
                 append("  ·  ${arbeit.size} in Arbeit · ${offen.size} offen")
             append("\n")
             if (t.note.isNotBlank()) append("Notiz: ${t.note}\n")
+            if (istLese(t)) {
+                val ls = Store.activeLieferungen().filter { it.taskId == t.id }
+                append("Lieferungen: ${lieferSumme(ls) ?: "noch keine"}${if (ls.isNotEmpty()) " (${ls.size}×)" else ""}\n")
+            }
             if (fertig.isNotEmpty()) {
                 append("\nErledigt:\n")
                 fertig.forEach { fid ->
@@ -2048,9 +2169,26 @@ class MainActivity : AppCompatActivity() {
         // sonst das erste Feld der Aufgabe.
         zoomToTaskFocus(t, ids)
 
-        AlertDialog.Builder(this)
+        var dlg: AlertDialog? = null
+        val zeigt = kartenAufgabeId == t.id
+        val kartenBtn = Button(this).apply {
+            setAllCaps(false)
+            text = if (zeigt) "🗺  Status-Anzeige auf der Karte ausblenden" else "🗺  Status auf der Karte zeigen"
+            setOnClickListener {
+                kartenAufgabeId = if (zeigt) null else t.id
+                drawStatic(); refresh(); dlg?.dismiss()
+                if (!zeigt) toast("Karte: ☑ erledigt · ◐ in Arbeit · ☐ offen – oben antippen zum Ausblenden")
+            }
+        }
+        val inhalt = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpx(16), dpx(6), dpx(16), 0)
+            addView(kartenBtn); addView(scroll)
+        }
+
+        dlg = AlertDialog.Builder(this)
             .setTitle(t.title)
-            .setView(scroll)
+            .setView(inhalt)
             .setPositiveButton("▶ Fahrt starten") { _, _ -> startDriveForTask(t) }
             .setNeutralButton("Schließen", null)
             .setNegativeButton("Löschen") { _, _ ->
@@ -2091,11 +2229,14 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("OK", null).show()
             return
         }
-        val label = listOf(t.typ, t.title).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { t.title }
+        val label = listOf(t.typ, t.title).filter { it.isNotBlank() }.distinct().joinToString(" · ").ifBlank { t.title }
         startDrive(label, t.id)
-        // Karte auf das erste Feld der Aufgabe schwenken
-        val allIds = Store.activeFields().map { it.id }
-        t.appliesTo(allIds).firstNotNullOfOrNull { Store.fieldById(it) }?.let { zoomTo(it) }
+        // Ohne eigene Position: Karte auf das erste offene Feld der Aufgabe schwenken
+        if (here() == null) {
+            val allIds = Store.activeFields().map { it.id }
+            val ids = t.appliesTo(allIds)
+            (ids.firstOrNull { t.stateOf(it) != "fertig" } ?: ids.firstOrNull())?.let { Store.fieldById(it) }?.let { zoomTo(it) }
+        }
     }
 
     /**
@@ -2166,7 +2307,7 @@ class MainActivity : AppCompatActivity() {
             b.stSpeed.text = String.format(Locale.GERMAN, "%.1f km/h", TrackingService.speedKmh)
             b.stArea.text = fmt(s.ha) + " ha"
             b.tvTitle.text = TrackingService.currentField?.let { "Im Feld: ${it.name}" }
-                ?: "Aufzeichnung laeuft"
+                ?: "Aufzeichnung läuft"
             b.tvSub.text = "${TrackingService.sourceText} · ${TrackingService.lastQuality}" +
                     (if (s.task.isNotBlank()) " · ${s.task}" else "")
 
@@ -2181,7 +2322,9 @@ class MainActivity : AppCompatActivity() {
             drawTrack(s.track, s.widthM)
         } else {
             b.tvTitle.text = getString(R.string.ready)
-            b.tvSub.text = getString(R.string.sub_ready)
+            val kt = kartenAufgabe()
+            b.tvSub.text = if (kt != null) "Karte zeigt „${kt.title}“: ☑ erledigt · ◐ in Arbeit · ☐ offen  (hier tippen = aus)"
+                           else getString(R.string.sub_ready)
         }
     }
 
@@ -2193,23 +2336,25 @@ class MainActivity : AppCompatActivity() {
         b.map.onResume()
         TrackingService.listener = { ui.post { refresh() } }
         refresh()
+        Sync.onChanged = { drawStatic(); refresh() }
         // Beim Öffnen automatisch mit dem Server abgleichen (falls eingerichtet)
         if (Sync.configured && !TrackingService.running) autoSync()
+        ladePositionen()
         // ... und danach alle 5 Minuten wiederholen, solange die App offen ist
         ui.removeCallbacks(syncTick)
-        if (Sync.configured) ui.postDelayed(syncTick, syncIntervalMs)
+        ui.postDelayed(syncTick, syncIntervalMs)
     }
 
+    /** Abgleich im Hintergrund; die Karte zeichnet sich über Sync.onChanged neu. */
     private fun autoSync() {
-        Sync.sync { changed, _ ->
-            if (changed) ui.post { drawStatic(); refresh() }
+        Sync.sync { _, _ ->
             // offene Foto-Uploads nachreichen (Meldungen)
-            if (PhotoUpload.hasPending()) {
-                Thread { runCatching { PhotoUpload.processQueue() }
-                    runOnUiThread { drawStatic() } }.start()
-            }
+            if (PhotoUpload.hasPending()) Thread { runCatching { PhotoUpload.processQueue() } }.start()
         }
     }
+
+    /** Neue/geänderte Daten gleich hochladen (nicht erst beim nächsten 5-Minuten-Takt) */
+    private fun syncSoon() { if (Sync.configured) autoSync() }
 
     override fun onPause() {
         super.onPause()
@@ -2219,6 +2364,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         TrackingService.listener = null
+        Sync.onChanged = null
         super.onDestroy()
     }
 }

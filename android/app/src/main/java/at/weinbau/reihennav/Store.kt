@@ -21,6 +21,22 @@ object Store {
     var ernte = mutableListOf<Ernte>()
     var lieferungen = mutableListOf<Lieferung>()
     var sorten = mutableListOf<String>()   // vom Server gepflegte Sorten-Liste
+    var typen = mutableListOf<String>()    // Aufgaben-Typen (vom Server, gleiche Liste wie im Web)
+
+    /** Standard-Typen, solange noch nichts vom Server kam (wie im Web) */
+    val STANDARD_TYPEN = listOf(
+        "Rebschnitt", "Anbinden / Biegen", "Ausbrechen", "Laubarbeit",
+        "Spritzen", "Bodenbearbeitung", "Ausdünnen", "Traubenkontrolle",
+        "Lese / Ernte", "Düngung", "Reparatur / Zaun", "Sonstiges"
+    )
+    /** aktuelle Typen-Liste (Server, sonst Standard) */
+    fun aufgabenTypen(): List<String> = typen.ifEmpty { STANDARD_TYPEN }
+
+    private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+    /** Code auf dem Hauptthread ausführen (dort ändert auch die Oberfläche die Daten). */
+    fun onMain(block: () -> Unit) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) block() else mainHandler.post(block)
+    }
 
     var widthM: Double = 2.0
     var night: Boolean = false
@@ -64,6 +80,8 @@ object Store {
             ntripPass = p.getString("ntripPass", "") ?: ""
             sorten = ((p.getString("sorten", "") ?: "").split("\n")
                 .map { it.trim() }.filter { it.isNotEmpty() }).toMutableList()
+            typen = ((p.getString("typen", "") ?: "").split("\n")
+                .map { it.trim() }.filter { it.isNotEmpty() }).toMutableList()
         }
         fields = readList("fields.json") { Field.fromJson(it) }
         sessions = readList("sessions.json") { Session.fromJson(it) }
@@ -91,6 +109,7 @@ object Store {
             .putString("ntripUser", ntripUser)
             .putString("ntripPass", ntripPass)
             .putString("sorten", sorten.joinToString("\n"))
+            .putString("typen", typen.joinToString("\n"))
             .apply()
     }
 
@@ -162,6 +181,20 @@ object Store {
         }
     }
 
+    /** Aufgaben-Typen (vom Server) übernehmen und merken. */
+    fun updateTypen(list: List<String>) {
+        val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
+        if (clean.isNotEmpty() && clean != typen) { typen = clean.toMutableList(); savePrefs() }
+    }
+
+    /** Letzte Lieferung an einem Feld (für die Vorbelegung von Sorte/Einheit). */
+    fun letzteLieferungAm(fieldId: String): Lieferung? =
+        activeLieferungen().filter { it.fieldId == fieldId }.maxByOrNull { it.ts }
+
+    /** Letzte Lieferung, die dieser Nutzer erfasst hat. */
+    fun letzteLieferungVon(u: String): Lieferung? =
+        activeLieferungen().filter { it.user == u }.maxByOrNull { it.ts }
+
     /** Sorten-Liste (vom Server) übernehmen und merken. */
     fun updateSorten(list: List<String>) {
         val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
@@ -207,7 +240,7 @@ object Store {
         val now = System.currentTimeMillis()
         if (Sync.configured && now - lastTaskSync > 20000L) {
             lastTaskSync = now
-            Thread { runCatching { Sync.sync { _, _ -> } } }.start()
+            Sync.sync { _, _ -> }   // läuft selbst im Hintergrund
         }
     }
 
@@ -233,7 +266,7 @@ object Store {
      */
     fun importJson(text: String): Triple<Int, Int, Int> {
         val o = JSONObject(text)
-        if (o.optString("app") != "reihen-navigator") error("Keine gueltige Sicherungsdatei")
+        if (o.optString("app") != "reihen-navigator") error("Keine gültige Sicherungsdatei")
         var nf = 0; var ns = 0; var nn = 0
 
         val fa = o.optJSONArray("fields") ?: JSONArray()

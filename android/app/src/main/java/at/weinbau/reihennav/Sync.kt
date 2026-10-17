@@ -16,8 +16,8 @@ import kotlin.concurrent.thread
  *          ("neuere Geraete-Zeit gewinnt")
  *  - since = hoechste erhaltene srv-Nummer merken
  *
- * Laeuft immer im Hintergrund-Thread; das Ergebnis kommt ueber onDone
- * zurueck auf den Hauptthread (per Handler in der Activity).
+ * Netz im Hintergrund, Einsammeln/Einmischen auf dem Hauptthread; das
+ * Ergebnis kommt ueber onDone auf dem Hauptthread zurueck.
  */
 object Sync {
 
@@ -58,66 +58,130 @@ object Sync {
 
     val configured: Boolean get() = Store.serverUrl.isNotBlank() && Store.serverToken.isNotBlank()
 
-    /** Ein Sync-Durchlauf. onDone(geaendert?, meldung). */
+    /** Zeitpunkt des letzten erfolgreichen Abgleichs (0 = noch keiner seit App-Start) */
+    @Volatile var lastOkAt: Long = 0
+
+    /**
+     * Wird nach jedem Abgleich aufgerufen, der Daten geändert hat – egal wer ihn
+     * ausgelöst hat (Knopf, 5-Minuten-Takt, Fahrt im Hintergrund). Die Karte
+     * hängt sich hier an und zeichnet sich dann neu. Läuft auf dem Hauptthread.
+     */
+    var onChanged: (() -> Unit)? = null
+
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    private var nochmal = false   // während eines Abgleichs kam eine neue Änderung
+
+    /**
+     * Ein Sync-Durchlauf. onDone(geaendert?, meldung) – kommt auf dem Hauptthread.
+     *
+     * Die Daten werden auf dem HAUPTTHREAD eingesammelt und eingemischt (dort
+     * ändert auch die Oberfläche die Listen), nur das Netz läuft im Hintergrund.
+     * So können Abgleich und Bedienung nie gleichzeitig dieselbe Liste ändern
+     * (das konnte früher selten zum Absturz führen).
+     */
     fun sync(onDone: (Boolean, String) -> Unit) {
-        if (!configured) { onDone(false, "Kein Server eingerichtet"); return }
-        if (busy) { onDone(false, "Sync läuft bereits"); return }
+        if (!configured) { main.post { onDone(false, "Kein Server eingerichtet") }; return }
+        main.post { syncAufHauptthread(onDone) }
+    }
+
+    private fun syncAufHauptthread(onDone: (Boolean, String) -> Unit) {
+        if (busy) {
+            // läuft schon: danach gleich noch einmal, damit die neue Änderung nicht 5 min wartet
+            nochmal = true
+            onDone(false, "Sync läuft bereits")
+            return
+        }
         busy = true
+        val t0 = System.currentTimeMillis()
+        val payload: String
+        try {
+            // 1. PUSH-Nutzlast: lokal seit lastPush geaenderte Datensaetze
+            val p = JSONObject()
+            p.put("token", Store.serverToken)   // Notfall-Token (falls Header geschluckt wird)
+            p.put("since", Store.syncSince)
+            p.put("fields", changedArray(Store.fields.map { it.toJson() to it.updatedAt }))
+            p.put("sessions", changedArray(Store.sessions.map { it.toJson() to it.updatedAt }))
+            p.put("notes", changedArray(Store.notes.map { it.toJson() to it.updatedAt }))
+            p.put("tasks", changedArray(Store.tasks.map { it.toJson() to it.updatedAt }))
+            p.put("meldungen", changedArray(Store.meldungen.map { it.toJson() to it.updatedAt }))
+            p.put("ernte", changedArray(Store.ernte.map { it.toJson() to it.updatedAt }))
+            p.put("lieferung", changedArray(Store.lieferungen.map { it.toJson() to it.updatedAt }))
+            payload = p.toString()
+        } catch (e: Exception) {
+            busy = false
+            onDone(false, "Sync fehlgeschlagen: ${e.message}")
+            return
+        }
         thread {
-            try {
-                val t0 = System.currentTimeMillis()
+            val antwort = try { post(base() + "/sync.php", payload, Store.serverToken) }
+                          catch (e: Exception) { null to (e.message ?: "keine Verbindung") }
+            main.post { einmischen(antwort, t0, onDone) }
+        }
+    }
 
-                // 1. PUSH-Nutzlast: lokal seit lastPush geaenderte Datensaetze
-                val payload = JSONObject()
-                payload.put("token", Store.serverToken)   // Notfall-Token (falls Header geschluckt wird)
-                payload.put("since", Store.syncSince)
-                payload.put("fields", changedArray(Store.fields.map { it.toJson() to it.updatedAt }))
-                payload.put("sessions", changedArray(Store.sessions.map { it.toJson() to it.updatedAt }))
-                payload.put("notes", changedArray(Store.notes.map { it.toJson() to it.updatedAt }))
-                payload.put("tasks", changedArray(Store.tasks.map { it.toJson() to it.updatedAt }))
-                payload.put("meldungen", changedArray(Store.meldungen.map { it.toJson() to it.updatedAt }))
-                payload.put("ernte", changedArray(Store.ernte.map { it.toJson() to it.updatedAt }))
-                payload.put("lieferung", changedArray(Store.lieferungen.map { it.toJson() to it.updatedAt }))
-
-                val (code, text) = post(base() + "/sync.php", payload.toString(), Store.serverToken)
-                if (code == 401) { busy = false; onDone(false, "Sitzung abgelaufen – neu anmelden"); return@thread }
+    /** 2. PULL-Antwort auf dem Hauptthread einmischen */
+    private fun einmischen(antwort: Pair<Int?, String>, t0: Long, onDone: (Boolean, String) -> Unit) {
+        var changed = false
+        var meldung: String
+        try {
+            val (code, text) = antwort
+            if (code == null) {
+                meldung = "Sync fehlgeschlagen: $text"
+            } else if (code == 401) {
+                meldung = "Sitzung abgelaufen – neu anmelden"
+            } else {
                 val j = JSONObject(text)
                 if (code != 200 || !j.optBoolean("ok")) {
-                    busy = false; onDone(false, j.optString("error", "Sync-Fehler ($code)")); return@thread
+                    meldung = j.optString("error", "Sync-Fehler ($code)")
+                } else {
+                    var maxSrv = Store.syncSince
+                    val geaendert = HashSet<String>()
+                    fun merk(name: String, c: Boolean) { if (c) geaendert.add(name) }
+                    val onSrv: (Long) -> Unit = { s -> if (s > maxSrv) maxSrv = s }
+                    merk("fields", mergeFields(j.optJSONArray("fields"), onSrv))
+                    merk("sessions", mergeSessions(j.optJSONArray("sessions"), onSrv))
+                    merk("notes", mergeNotes(j.optJSONArray("notes"), onSrv))
+                    merk("tasks", mergeTasks(j.optJSONArray("tasks"), onSrv))
+                    merk("meldungen", mergeMeldungen(j.optJSONArray("meldungen"), onSrv))
+                    merk("ernte", mergeErnte(j.optJSONArray("ernte"), onSrv))
+                    merk("lieferung", mergeLieferung(j.optJSONArray("lieferung"), onSrv))
+
+                    // Sorten- und Typen-Liste vom Server (im Web gepflegt)
+                    j.optJSONArray("sorten")?.let { Store.updateSorten(strings(it)) }
+                    j.optJSONArray("typen")?.let { Store.updateTypen(strings(it)) }
+
+                    Store.syncSince = maxSrv
+                    Store.lastPush = t0
+                    Store.savePrefs()
+                    // nur die Listen speichern, die sich wirklich geändert haben
+                    if ("fields" in geaendert) Store.saveFields()
+                    if ("sessions" in geaendert) Store.saveSessions()
+                    if ("notes" in geaendert) Store.saveNotes()
+                    if ("tasks" in geaendert) Store.saveTasks()
+                    if ("meldungen" in geaendert) Store.saveMeldungen()
+                    if ("ernte" in geaendert) Store.saveErnte()
+                    if ("lieferung" in geaendert) Store.saveLieferungen()
+                    changed = geaendert.isNotEmpty()
+
+                    val pushed = j.optInt("pushed", 0)
+                    lastResult = "gesendet $pushed"
+                    lastOkAt = System.currentTimeMillis()
+                    meldung = "Synchronisiert (↑$pushed)"
                 }
-
-                // 2. PULL einmischen
-                var maxSrv = Store.syncSince
-                var changed = false
-                changed = mergeFields(j.optJSONArray("fields")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeSessions(j.optJSONArray("sessions")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeNotes(j.optJSONArray("notes")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeTasks(j.optJSONArray("tasks")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeMeldungen(j.optJSONArray("meldungen")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeErnte(j.optJSONArray("ernte")) { s -> if (s > maxSrv) maxSrv = s } || changed
-                changed = mergeLieferung(j.optJSONArray("lieferung")) { s -> if (s > maxSrv) maxSrv = s } || changed
-
-                // Sorten-Liste vom Server (read-only, im Web gepflegt)
-                j.optJSONArray("sorten")?.let { sa ->
-                    val list = ArrayList<String>(sa.length())
-                    for (i in 0 until sa.length()) list.add(sa.optString(i, ""))
-                    Store.updateSorten(list)
-                }
-
-                Store.syncSince = maxSrv
-                Store.lastPush = t0
-                Store.savePrefs()
-                if (changed) { Store.saveFields(); Store.saveSessions(); Store.saveNotes(); Store.saveTasks(); Store.saveMeldungen(); Store.saveErnte(); Store.saveLieferungen() }
-
-                busy = false
-                val pushed = j.optInt("pushed", 0)
-                lastResult = "gesendet $pushed"
-                onDone(changed, "Synchronisiert (↑$pushed)")
-            } catch (e: Exception) {
-                busy = false
-                onDone(false, "Sync fehlgeschlagen: ${e.message}")
             }
+        } catch (e: Exception) {
+            meldung = "Sync fehlgeschlagen: ${e.message}"
         }
+        busy = false
+        if (changed) runCatching { onChanged?.invoke() }
+        onDone(changed, meldung)
+        if (nochmal) { nochmal = false; sync { _, _ -> } }
+    }
+
+    private fun strings(a: JSONArray): List<String> {
+        val list = ArrayList<String>(a.length())
+        for (i in 0 until a.length()) list.add(a.optString(i, ""))
+        return list
     }
 
     /** nur Datensaetze mit updatedAt > lastPush senden */
@@ -184,9 +248,8 @@ object Sync {
             val inc = Task.fromJson(o)
             val cur = Store.tasks.firstOrNull { it.id == inc.id }
             if (cur == null) { Store.tasks.add(inc); changed = true }
-            else if (inc.updatedAt > cur.updatedAt) {
-                Store.tasks[Store.tasks.indexOf(cur)] = inc; changed = true
-            }
+            // Feld für Feld zusammenführen statt die ganze Aufgabe zu ersetzen
+            else if (cur.mergeFrom(inc)) changed = true
         }
         return changed
     }
@@ -239,7 +302,6 @@ object Sync {
         return changed
     }
 
-    /** HTTP POST mit JSON; liefert (statuscode, antworttext) */
     /** Eigene Position melden (optional) und alle aktuellen Positionen holen. */
     fun fetchPositions(myLat: Double?, myLng: Double?, acc: Double?): org.json.JSONArray? {
         if (!configured) return null
@@ -261,6 +323,7 @@ object Sync {
         Thread { runCatching { fetchPositions(lat, lng, acc) } }.start()
     }
 
+    /** HTTP POST mit JSON; liefert (statuscode, antworttext) */
     private fun post(urlStr: String, jsonBody: String, token: String?): Pair<Int, String> {
         val url = URL(urlStr)
         val c = url.openConnection() as HttpURLConnection
