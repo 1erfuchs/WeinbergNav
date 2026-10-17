@@ -11,8 +11,11 @@ android {
         applicationId = "at.weinbau.reihennav"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // Version = Nummer des GitHub-Builds + Baudatum -> in der App unter
+        // Mehr → Einstellungen sichtbar, so sieht man, ob das neue APK drauf ist
+        val buildNr = (System.getenv("GITHUB_RUN_NUMBER") ?: "").toIntOrNull() ?: 1
+        versionCode = buildNr
+        versionName = "1.$buildNr (" + java.time.LocalDate.now().toString() + ")"
     }
 
     buildTypes {
