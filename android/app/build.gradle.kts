@@ -1,3 +1,5 @@
+import java.time.LocalDate
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -15,7 +17,7 @@ android {
         // Mehr → Einstellungen sichtbar, so sieht man, ob das neue APK drauf ist
         val buildNr = (System.getenv("GITHUB_RUN_NUMBER") ?: "").toIntOrNull() ?: 1
         versionCode = buildNr
-        versionName = "1.$buildNr (" + java.time.LocalDate.now().toString() + ")"
+        versionName = "1.$buildNr (" + LocalDate.now().toString() + ")"
     }
 
     buildTypes {
